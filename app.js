@@ -336,7 +336,7 @@
     row.append(status);
     if (hl.length) {
       const b = h(`<button class="btn small">清除本條全部螢光（${hl.length}）</button>`);
-      b.onclick = () => { if (confirm('確定清除本條所有螢光標記？')) { Store.del('hl:' + no); refreshArticle(no); } };
+      b.onclick = async () => { if (await ask('確定清除本條所有螢光標記？', '清除')) { Store.del('hl:' + no); refreshArticle(no); } };
       row.append(b);
     }
     panel.append(h(`<p class="muted">提示：在條文上長按並選取文字，即可加上螢光標記或「加註」引用該段文字。</p>`));
@@ -695,7 +695,7 @@
         const act = b.dataset.act;
         if (act === 'undo' && hist.length) { data.strokes = JSON.parse(hist.pop()); redraw(); save(); }
         if (act === 'more') { data.h += 300; redraw(); save(); }
-        if (act === 'clear' && data.strokes.length && confirm('清空本條所有手寫內容？')) { snap(); data.strokes = []; data.h = 520; redraw(); save(); }
+        if (act === 'clear' && data.strokes.length) ask('清空本條所有手寫內容？', '清空').then((ok) => { if (ok) { snap(); data.strokes = []; data.h = 520; redraw(); save(); } });
         if (act === 'write') writing = !writing;
         syncTools();
       });
@@ -1102,9 +1102,9 @@
       if (b.dataset.fs) { S.fs = Math.min(30, Math.max(14, S.fs + +b.dataset.fs)); $('#fsv', body).textContent = S.fs; saveSettings(); }
       if (b.dataset.act === 'export') exportData();
       if (b.dataset.act === 'import') body.querySelector('input[type=file]').click();
-      if (b.dataset.act === 'wipe' && confirm('確定清除所有註記、螢光、手寫、書籤與自訂判解？此動作無法復原（建議先匯出備份）。')) {
-        Store.clearAll().then(() => { loadSettings(); rerenderAll(); dlg.close(); toast('已清除'); });
-      }
+      if (b.dataset.act === 'wipe') ask('確定清除所有註記、螢光、手寫、書籤與自訂判解？此動作無法復原（建議先匯出備份）。', '全部清除').then((ok) => {
+        if (ok) Store.clearAll().then(() => { loadSettings(); rerenderAll(); dlg.close(); toast('已清除'); });
+      });
     });
     body.querySelector('input[type=file]').onchange = (e) => { const f = e.target.files[0]; if (f) importData(f); };
     openDialog('設定與備份', body);
@@ -1130,8 +1130,10 @@
     const d = new Date();
     const name = `勞基法法典備份-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.json`;
     const file = typeof File === 'function' ? new File([blob], name, { type: 'application/json' }) : null;
-    if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
-      navigator.share({ files: [file], title: name }).catch(() => download());
+    const sandboxed = /claude|anthropic|usercontent/.test(location.hostname);
+    if (sandboxed) showExportText(JSON.stringify(payload), name);
+    else if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+      navigator.share({ files: [file], title: name }).catch((e) => { if (e && e.name !== 'AbortError') download(); });
     } else download();
     function download() {
       const a = document.createElement('a');
@@ -1149,14 +1151,46 @@
         const p = JSON.parse(r.result);
         if (p.app !== 'lsa-codex' || !p.data) throw new Error('不是本 App 的備份檔');
         const n = Object.keys(p.data).length;
-        const replace = confirm(`備份檔含 ${n} 筆資料（${(p.exported || '').slice(0, 10)}）。\n\n按「確定」：以備份完全取代目前資料\n按「取消」：合併（同一條的資料以備份為準）`);
-        if (replace) Store.clearAll();
-        Object.entries(p.data).forEach(([k, v]) => Store.set(k, v));
-        loadSettings(); rerenderAll(); dlg.close();
-        toast('匯入完成');
+        ask(`備份檔含 ${n} 筆資料（${(p.exported || '').slice(0, 10)}）。要如何匯入？`, '完全取代目前資料', '合併（同一條以備份為準）').then(async (r) => {
+          if (r === null) return;
+          if (r === true) await Store.clearAll();
+          Object.entries(p.data).forEach(([k, v]) => Store.set(k, v));
+          loadSettings(); rerenderAll(); dlg.close();
+          toast('匯入完成');
+        });
       } catch (e) { toast('匯入失敗：' + e.message); }
     };
     r.readAsText(file);
+  }
+
+  // in-page confirm (window.confirm is unavailable in some embedded viewers)
+  function ask(msg, okText, altText) {
+    return new Promise((res) => {
+      const d = $('#ask');
+      d.innerHTML = '';
+      const body = h(`<div class="dlg-b" style="max-height:none"></div>`);
+      body.textContent = msg;
+      const f = h(`<div class="dlg-f"></div>`);
+      const mk = (t, cls, v) => { const b = h(`<button class="btn ${cls}">${esc(t)}</button>`); b.onclick = () => { done = true; d.close(); res(v); }; f.append(b); };
+      let done = false;
+      mk('取消', '', altText ? null : false);
+      if (altText) mk(altText, '', false);
+      mk(okText || '確定', 'primary', true);
+      d.append(body, f);
+      d.onclose = () => { if (!done) res(altText ? null : false); };
+      d.showModal();
+    });
+  }
+
+  function showExportText(json, name) {
+    const body = h(`<div><p class="muted" style="margin-top:0">此環境無法直接下載檔案。請按「複製」後貼到「備忘錄」或存成 ${esc(name)}；之後可用「匯入備份」選擇該檔案還原。</p>
+      <div class="field"><textarea id="exportText" readonly style="min-height:200px;font-family:ui-monospace,monospace;font-size:12px"></textarea></div></div>`);
+    $('textarea', body).value = json;
+    openDialog('匯出備份', body, [{ text: '複製', cls: 'primary', fn: () => {
+      const ta = $('textarea', body);
+      navigator.clipboard.writeText(json).then(() => toast('已複製'), () => { ta.focus(); ta.select(); toast('請手動全選複製'); });
+      return false;
+    } }]);
   }
 
   let toastT;
@@ -1237,13 +1271,14 @@
         if (act === 'expand') { const b = $('.case-body', card); b.classList.toggle('clamp'); t.textContent = b.classList.contains('clamp') ? '展開全文' : '收合'; }
         if (act === 'cnote') editCaseNote(id);
         if (act === 'edit') editCase(id);
-        if (act === 'del' && confirm('刪除這則自訂資料？')) {
+        if (act === 'del') ask('刪除這則自訂資料？', '刪除').then((ok) => {
+          if (!ok) return;
           const list = Store.get('ucases', []);
           const c = list.find((x) => x.id === id);
           Store.set('ucases', list.filter((x) => x.id !== id));
           Store.del('cnote:' + id);
           afterCaseChange(c ? c.arts : []);
-        }
+        });
       }
     });
 
