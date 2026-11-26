@@ -1,0 +1,59 @@
+# 勞基法法典（iPad 版）
+
+一本可以「寫在上面」的勞動基準法電子法典。專為 iPad（Safari / 加入主畫面）設計，也可在電腦、手機瀏覽器使用；第一次開啟後可離線使用。
+
+## 功能
+
+| 功能 | 說明 |
+| --- | --- |
+| 現行條文 | 全 98 條（113.07.31 修正），依章節排列；條文中引用的「第○條」可直接點選跳轉 |
+| 螢光筆／底線 | 在條文上長按選取文字 → 黃、綠、藍、粉紅螢光或紅色底線，✕ 清除 |
+| 文字註記 | 每條一個註記本，自動儲存，並顯示在條文下方（像在法典空白處寫字）；選取文字按「加註」可引用該段 |
+| 手寫筆記 | 每條一張手寫紙，支援 Apple Pencil 壓力感應、5 種筆色、粗細、螢光筆、橡皮擦、復原；預設「僅 Pencil 書寫」，手指照常捲動 |
+| 判解函釋 | 大法官解釋 16 則（全國法規資料庫原文）、最高法院判決要旨與勞動部（勞委會）函釋，依條號歸類；可自行新增判決／函釋、對每則加個人註記 |
+| 新舊條文對照 | 「修法沿革」列出 73 年制定以來 24 次公布的修正條文對照表；每條的「沿革對照」可任選兩個版本比較，新增文字綠底、刪除文字紅色刪除線 |
+| 搜尋 | 同時搜尋條文、我的註記、判解函釋；輸入條號（24、9-1、9之1、第32條之1）按 Enter 直接跳轉 |
+| 書籤 | 條文右上角星號；「我的筆記」彙整書籤、註記、螢光、手寫與自訂判解 |
+| 外觀 | 字級、黑體／明體、淺色／護眼／深色、項次標示（Ⅰ Ⅱ／① ②） |
+| 備份 | 「設定」→ 匯出備份（JSON，可存到「檔案」或 iCloud Drive）、匯入（取代或合併） |
+
+## 在 iPad 上使用
+
+1. 把本 repo 部署為靜態網站（擇一）：
+   - **GitHub Pages**：Settings → Pages → Source 選 `Deploy from a branch`，選擇分支與 `/ (root)`。
+   - 或任何靜態主機（Netlify、Cloudflare Pages、自架伺服器）。全部是靜態檔，不需後端。
+2. 用 iPad Safari 開啟網址 → 分享 → **加入主畫面**。之後從主畫面開啟即為全螢幕 App，離線也能用。
+3. 個人資料只存在該裝置瀏覽器（IndexedDB）。**請定期在「設定」匯出備份**；換裝置時匯入即可。
+
+> 本機測試：`python3 -m http.server` 後開啟 `http://localhost:8000/`。
+
+## 資料來源與正確性
+
+- 現行條文、歷次修正版本條文、大法官解釋：法務部「全國法規資料庫」（law.moj.gov.tw）。
+- 判決：以司法院裁判書系統（judgment.judicial.gov.tw）近年勞動判決為樣本，統計被引用最多的最高法院判決，要旨文字摘錄自**實際引用該判決的法院判決原文**，並附上引用判決連結。
+- 函釋：同樣取自法院判決中引用的主管機關函號與內容。
+- 本工具僅供學習與參考，正式引用請查核原文。
+
+## 專案結構
+
+```
+index.html, app.css, app.js   前端（無相依套件）
+sw.js, manifest.webmanifest   PWA 離線快取與安裝
+data/lsa-data.js              建置產生的資料檔（請勿手改）
+data/raw/                     官方原始資料（各版本條文、解釋、條號對應）
+data/curated/cases.json       判決、函釋資料（可自行增修後重新建置）
+tools/                        抓取、解析、建置腳本
+```
+
+### 重新建置資料
+
+```bash
+# 1. 解析全國法規資料庫各版本 HTML（LawAll.aspx / LawOldVer.aspx?lnndate=YYYYMMDD）
+python3 tools/parse_moj.py data/raw/versions.json path/to/ver/*.html
+# 2. 解析大法官解釋頁（ExContent.aspx）
+python3 tools/parse_ex.py data/raw/interp.json path/to/ex/*.html
+# 3. 產生 data/lsa-data.js
+python3 tools/build_data.py
+```
+
+修法後只要下載新版 `LawAll.aspx` 存成 `YYYYMMDD.html`，連同舊版一起重跑步驟 1、3（並在 `data/raw/meta.json` 的 `histories` 補上沿革文字）。
