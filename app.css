@@ -325,3 +325,26 @@ del.d { background: var(--red-soft); color: var(--red); text-decoration: line-th
   .art { box-shadow: none; break-inside: avoid; }
 }
 [hidden] { display: none !important; }
+
+/* ---------- inline annotations on article text ---------- */
+:root { --ann-r: #c62828; --ann-n: #1a3a8f; --ann-g: #1b7a43; --ann-v: #6a32a8; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="sepia"]) { --ann-r: #ff8a80; --ann-n: #9db8ff; --ann-g: #7ee2a8; --ann-v: #d0a6ff; }
+}
+:root[data-theme="dark"] { --ann-r: #ff8a80; --ann-n: #9db8ff; --ann-g: #7ee2a8; --ann-v: #d0a6ff; }
+.ann-r { --ann: var(--ann-r); } .ann-n { --ann: var(--ann-n); } .ann-g { --ann: var(--ann-g); } .ann-v { --ann: var(--ann-v); }
+.annu-r { --ann: var(--ann-r); } .annu-n { --ann: var(--ann-n); } .annu-g { --ann: var(--ann-g); } .annu-v { --ann: var(--ann-v); }
+.annu { text-decoration: underline 1.5px var(--ann); text-underline-offset: 5px; }
+.ann { cursor: pointer; -webkit-user-select: none; user-select: none; }
+.ann::after {
+  content: attr(data-t);
+  color: var(--ann);
+  font-family: -apple-system, "PingFang TC", "Noto Sans TC", sans-serif;
+  font-size: .62em; font-weight: 600; line-height: 1.4; letter-spacing: 0;
+  margin: 0 .25em; padding: 0 .2em;
+  border-left: 2px solid var(--ann);
+  white-space: pre-wrap;
+}
+.ann:active::after { background: var(--accent-soft); }
+.ann-inline { color: var(--ann); font-size: .85em; font-weight: 600; margin-left: .3em; }
+.ann-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--ann); margin-right: 5px; vertical-align: middle; }

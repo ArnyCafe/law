@@ -107,7 +107,7 @@
   /* ------------------------------------------------------------------ *
    * settings
    * ------------------------------------------------------------------ */
-  const DEFAULTS = { fs: 19, font: 'sans', theme: 'auto', pno: 'roman', pencilOnly: true, showNotes: true, showInk: true, xref: true };
+  const DEFAULTS = { showAnn: true, fs: 19, font: 'sans', theme: 'auto', pno: 'roman', pencilOnly: true, showNotes: true, showInk: true, xref: true };
   let S = {};
   function loadSettings() { S = Object.assign({}, DEFAULTS, Store.get('settings', {})); applySettings(); }
   function saveSettings() { Store.set('settings', S); applySettings(); }
@@ -147,24 +147,33 @@
     return out;
   }
 
-  function renderLineHTML(text, { hls = [], refs = [], hits = [] }) {
+  function renderLineHTML(text, { hls = [], refs = [], hits = [], anns = [] }) {
     const n = text.length;
     if (!n) return '';
+    // anns: [{s, e, c, t, idx, end}] — underline s..e; when end=true, show the note after e
+    const und = new Array(n).fill('');
+    const ins = new Map();
+    anns.forEach((a) => {
+      for (let i = Math.max(0, a.s); i < Math.min(n, a.e); i++) und[i] = a.c;
+      if (a.end) { const p = Math.min(n, Math.max(0, a.e)); if (!ins.has(p)) ins.set(p, []); ins.get(p).push(a); }
+    });
+    const annHTML = (p) => (ins.get(p) || []).map((a) => `<span class="ann ann-${a.c}" data-ann="${a.idx}" data-t="${esc(a.t)}" role="button" aria-label="註記：${esc(a.t)}"></span>`).join('');
     const col = new Array(n).fill('');
     hls.forEach((r) => { for (let i = Math.max(0, r.s); i < Math.min(n, r.e); i++) col[i] = r.c; });
     const ref = new Array(n).fill(null);
     refs.forEach((r) => { for (let i = r.s; i < r.e; i++) ref[i] = r; });
     const hit = new Array(n).fill(false);
     hits.forEach((r) => { for (let i = r.s; i < r.e; i++) hit[i] = true; });
-    let html = '', i = 0;
+    let html = annHTML(0), i = 0;
     while (i < n) {
       let j = i + 1;
-      while (j < n && col[j] === col[i] && ref[j] === ref[i] && hit[j] === hit[i]) j++;
+      while (j < n && col[j] === col[i] && ref[j] === ref[i] && hit[j] === hit[i] && und[j] === und[i] && !ins.has(j)) j++;
       let seg = esc(text.slice(i, j));
       if (hit[i]) seg = `<mark class="h h-hit">${seg}</mark>`;
       if (col[i]) seg = `<mark class="h h-${col[i]}">${seg}</mark>`;
+      if (und[i]) seg = `<span class="annu annu-${und[i]}">${seg}</span>`;
       if (ref[i]) seg = `<a class="xref" data-go="${ref[i].no}">${seg}</a>`;
-      html += seg; i = j;
+      html += seg + annHTML(j); i = j;
     }
     return html;
   }
@@ -187,6 +196,7 @@
 
   function articleBodyHTML(a, hitQ) {
     const hl = Store.get('hl:' + a.no, []);
+    const ann = S.showAnn ? Store.get('ann:' + a.no, []) : [];
     const paras = a.lines.filter((l) => l.i === 0).length;
     let p = 0;
     return a.lines.map((l, li) => {
@@ -196,7 +206,7 @@
         p++;
         if (paras > 1 && S.pno !== 'none') pno = `<span class="pno" aria-hidden="true">${PNO[S.pno][p - 1] || p}</span>`;
       }
-      const inner = renderLineHTML(l.t, { hls: hl.filter((r) => r.l === li), refs: xrefs(l.t, a.no), hits: findHits(l.t, hitQ) });
+      const inner = renderLineHTML(l.t, { hls: hl.filter((r) => r.l === li), refs: xrefs(l.t, a.no), hits: findHits(l.t, hitQ), anns: annsForLine(ann, li) });
       return `<p class="ln ${cls}${cls === 'para' && (paras <= 1 || S.pno === 'none') ? ' single' : ''}" data-li="${li}">${pno}<span class="lt">${inner}</span></p>`;
     }).join('');
   }
@@ -207,7 +217,49 @@
   const openDetail = new Map(); // no -> tab
 
   function hasMine(no) {
-    return !!(Store.get('note:' + no) || Store.get('hl:' + no) || Store.get('ink:' + no));
+    return !!(Store.get('note:' + no) || Store.get('hl:' + no) || Store.get('ink:' + no) || Store.get('ann:' + no));
+  }
+
+  // inline annotation on the article text: {r:[{l,s,e}], t: text, c: 'r'|'n'|'g'|'v'}
+  function annsForLine(list, li) {
+    const out = [];
+    list.forEach((a, idx) => {
+      const last = a.r[a.r.length - 1];
+      a.r.forEach((rg) => { if (rg.l === li) out.push({ s: rg.s, e: rg.e, c: a.c, t: a.t, idx, end: rg === last }); });
+    });
+    return out;
+  }
+  const ANN_COLORS = [['r', '紅'], ['n', '深藍'], ['g', '綠'], ['v', '紫']];
+  function annQuote(no, a) {
+    const art = ART.get(no);
+    return a.r.map((rg) => (art.lines[rg.l] || { t: '' }).t.slice(rg.s, rg.e)).join('…');
+  }
+  function editAnn(no, idx, ranges) {
+    const list = Store.get('ann:' + no, []).slice();
+    const isNew = idx == null;
+    const a = isNew ? { r: ranges, t: '', c: Store.get('annColor', 'r') } : { ...list[idx] };
+    if (!a || !a.r) return;
+    let color = a.c;
+    const body = h(`<div>
+      <p class="muted" style="margin-top:0">${label(no)}：「${esc(annQuote(no, a))}」</p>
+      <div class="field"><label for="annText">註記文字（以小字顯示在這段條文後面）</label><textarea id="annText" style="min-height:90px">${esc(a.t)}</textarea></div>
+      <div class="field"><label>顏色</label><span class="seg">${ANN_COLORS.map(([k, t]) => `<button data-c="${k}" class="${k === color ? 'on' : ''}"><span class="ann-dot ann-${k}"></span>${t}</button>`).join('')}</span></div>
+    </div>`);
+    body.querySelector('.seg').onclick = (e) => { const b = e.target.closest('[data-c]'); if (!b) return; color = b.dataset.c; $$('.seg button', body).forEach((x) => x.classList.toggle('on', x === b)); };
+    const btns = [{ text: '取消', fn: () => {} }];
+    if (!isNew) btns.push({ text: '刪除', cls: 'danger', fn: () => { list.splice(idx, 1); Store.set('ann:' + no, list); refreshArticle(no); toast('已刪除註記'); } });
+    btns.push({ text: '儲存', cls: 'primary', fn: () => {
+      const t = $('#annText', body).value.trim();
+      if (!t) { toast('請輸入註記文字'); return false; }
+      const item = { r: a.r, t, c: color };
+      if (isNew) list.push(item); else list[idx] = item;
+      list.sort((x, y) => x.r[0].l - y.r[0].l || x.r[0].s - y.r[0].s);
+      Store.set('ann:' + no, list);
+      Store.set('annColor', color);
+      refreshArticle(no);
+    } });
+    openDialog(isNew ? '在條文上加註' : '編輯條文註記', body, btns);
+    setTimeout(() => { const ta = $('#annText', body); if (ta) ta.focus(); }, 60);
   }
 
   function badgesHTML(a) {
@@ -339,7 +391,7 @@
       b.onclick = async () => { if (await ask('確定清除本條所有螢光標記？', '清除')) { Store.del('hl:' + no); refreshArticle(no); } };
       row.append(b);
     }
-    panel.append(h(`<p class="muted">提示：在條文上長按並選取文字，即可加上螢光標記或「加註」引用該段文字。</p>`));
+    panel.append(h(`<p class="muted">提示：在條文上長按並選取文字，可加上螢光標記，或按「加註」把小字註記直接寫在該段條文後面（紅、深藍、綠、紫）。點條文上的註記可編輯或刪除。</p>`));
     setTimeout(() => { if (panel.isConnected && !matchMedia('(pointer:coarse)').matches) ta.focus(); }, 50);
   }
 
@@ -785,15 +837,7 @@
     if (!b || !selInfo) return;
     const { no, ranges, text } = selInfo;
     if (b.dataset.c) applyHighlight(no, ranges, b.dataset.c);
-    if (b.dataset.act === 'note') {
-      const cur = Store.get('note:' + no, '');
-      Store.set('note:' + no, (cur ? cur.replace(/\s*$/, '') + '\n\n' : '') + `「${text.trim()}」：`);
-      if (!ranges.length) return;
-      applyHighlight(no, ranges, 'y');
-      setDetail(no, 'note');
-      const ta = $(`#a-${CSS.escape(no)} textarea.note`);
-      if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
-    }
+    if (b.dataset.act === 'note') { void text; editAnn(no, null, ranges); }
     window.getSelection().removeAllRanges();
     hlbar.hidden = true;
   });
@@ -953,6 +997,8 @@
       const parts = [];
       if (Store.get('note:' + a.no)) parts.push(esc(Store.get('note:' + a.no)).slice(0, 160));
       if (hl.length) parts.push(`<span class="muted">螢光 ${hl.length} 處：</span>` + hl.slice(0, 3).map((r) => `<mark class="h h-${r.c}">${esc((a.lines[r.l] || { t: '' }).t.slice(r.s, r.e))}</mark>`).join('　'));
+      const anns = Store.get('ann:' + a.no, []);
+      if (anns.length) parts.push(`<span class="muted">條文註記 ${anns.length} 則：</span>` + anns.slice(0, 4).map((x) => `「${esc(annQuote(a.no, x))}」<span class="ann-inline ann-${x.c}">${esc(x.t)}</span>`).join('　'));
       if (Store.get('ink:' + a.no)) parts.push('<span class="muted">✍︎ 含手寫筆記</span>');
       v.append(resultItem(a.no, parts.join('<br>'), true));
     });
@@ -991,7 +1037,7 @@
       const t = artText(a);
       const i = t.toLowerCase().indexOf(q.toLowerCase());
       if (i >= 0) ra.push({ no: a.no, html: snip(t, i), n: findHits(t, q).length });
-      const note = Store.get('note:' + a.no, '');
+      const note = [Store.get('note:' + a.no, ''), ...Store.get('ann:' + a.no, []).map((x) => x.t)].filter(Boolean).join('　');
       const j = note.toLowerCase().indexOf(q.toLowerCase());
       if (j >= 0) rn.push({ no: a.no, html: snip(note, j) });
     });
@@ -1070,18 +1116,19 @@
 
   function openSettings() {
     const seg = (k, opts) => `<span class="seg" data-k="${k}">${opts.map(([v, t]) => `<button data-v="${v}" class="${String(S[k]) === String(v) ? 'on' : ''}">${t}</button>`).join('')}</span>`;
-    const cnt = { note: Store.keys('note:').length, hl: Store.keys('hl:').length, ink: Store.keys('ink:').length, u: Store.get('ucases', []).length };
+    const cnt = { ann: Store.keys('ann:').reduce((n, k) => n + Store.get(k, []).length, 0), note: Store.keys('note:').length, hl: Store.keys('hl:').length, ink: Store.keys('ink:').length, u: Store.get('ucases', []).length };
     const body = h(`<div>
       <div class="set-row"><span class="lbl">條文字級</span><span class="row"><button class="btn small" data-fs="-1">A−</button><b id="fsv">${S.fs}</b><button class="btn small" data-fs="1">A＋</button></span></div>
       <div class="set-row"><span class="lbl">條文字體</span>${seg('font', [['sans', '黑體'], ['serif', '明體']])}</div>
       <div class="set-row"><span class="lbl">外觀</span>${seg('theme', [['auto', '自動'], ['light', '淺色'], ['sepia', '護眼'], ['dark', '深色']])}</div>
       <div class="set-row"><span class="lbl">項次標示</span>${seg('pno', [['roman', 'Ⅰ Ⅱ'], ['circle', '① ②'], ['none', '不標示']])}</div>
       <div class="set-row"><span class="lbl">手寫<small>開啟時手指捲動、Apple Pencil 書寫</small></span>${seg('pencilOnly', [[true, '僅 Pencil'], [false, '手指也可寫']])}</div>
+      <div class="set-row"><span class="lbl">顯示條文上的小字註記</span>${seg('showAnn', [[true, '顯示'], [false, '隱藏']])}</div>
       <div class="set-row"><span class="lbl">條文下顯示我的註記</span>${seg('showNotes', [[true, '顯示'], [false, '隱藏']])}</div>
       <div class="set-row"><span class="lbl">條文下顯示手寫筆記</span>${seg('showInk', [[true, '顯示'], [false, '隱藏']])}</div>
       <div class="set-row"><span class="lbl">條文內引用條號可點選</span>${seg('xref', [[true, '開'], [false, '關']])}</div>
       <h4 style="margin:18px 0 6px">備份與還原</h4>
-      <p class="muted" style="margin-top:0">註記 ${cnt.note} 條・螢光 ${cnt.hl} 條・手寫 ${cnt.ink} 條・自訂判解 ${cnt.u} 則。資料只存在這台裝置的瀏覽器（${Store.mode === 'idb' ? 'IndexedDB' : Store.mode === 'ls' ? 'localStorage' : '暫存記憶體，關閉後會消失'}），建議定期匯出備份到「檔案」或 iCloud Drive。</p>
+      <p class="muted" style="margin-top:0">條文小字註記 ${cnt.ann} 則・註記本 ${cnt.note} 條・螢光 ${cnt.hl} 條・手寫 ${cnt.ink} 條・自訂判解 ${cnt.u} 則。資料只存在這台裝置的瀏覽器（${Store.mode === 'idb' ? 'IndexedDB' : Store.mode === 'ls' ? 'localStorage' : '暫存記憶體，關閉後會消失'}），建議定期匯出備份到「檔案」或 iCloud Drive。</p>
       <div class="row"><button class="btn primary" data-act="export">匯出備份</button><button class="btn" data-act="import">匯入備份</button><button class="btn danger" data-act="wipe">清除全部個人資料</button></div>
       <input type="file" accept="application/json,.json" hidden>
       <h4 style="margin:18px 0 6px">安裝到主畫面</h4>
@@ -1253,6 +1300,8 @@
         if (act === 'detail') { openDetail.has(no) ? setDetail(no, null) : setDetail(no, 'note'); return; }
         if (act === 'open-note') { setDetail(no, 'note'); return; }
         if (act === 'open-ink') { setDetail(no, 'ink'); return; }
+        const annEl = t.closest('.ann');
+        if (annEl) { editAnn(no, +annEl.dataset.ann); return; }
         const badge = t.closest('.badge[data-tab]');
         if (badge) { setDetail(no, badge.dataset.tab, badge.dataset.f); return; }
         const tab = t.closest('.tab');

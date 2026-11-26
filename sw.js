@@ -1,5 +1,5 @@
 /* 離線快取：首次開啟後即可離線使用；有網路時背景更新 */
-const CACHE = 'lsa-codex-v1';
+const CACHE = 'lsa-codex-v2';
 const ASSETS = ['./', 'index.html', 'app.css', 'app.js', 'data/lsa-data.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
