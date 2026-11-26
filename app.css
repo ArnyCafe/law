@@ -258,7 +258,7 @@ del.d { background: var(--red-soft); color: var(--red); text-decoration: line-th
 .amend .a-date { font-weight: 800; color: var(--accent); font-size: 17px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .amend .a-arts { font-size: 14px; color: var(--ink-2); }
 .amend .a-body { padding: 0 16px 16px; }
-.amend .a-desc { font-size: 13px; color: var(--ink-3); line-height: 1.6; margin-bottom: 12px; }
+.amend .a-desc { font-size: 13px; color: var(--ink-3); line-height: 1.6; margin-bottom: 12px;  white-space: pre-line; }
 .amend .a-art { margin: 16px 0 8px; font-weight: 700; display: flex; gap: 8px; align-items: center; }
 .amend .a-art button { font-size: 12px; }
 
@@ -368,3 +368,76 @@ body.doodling .art { box-shadow: 0 0 0 1.5px var(--accent-2), var(--shadow); }
 .dbar .sw.on { outline: 3px solid var(--accent-2); outline-offset: 1px; }
 .dbar .sep { width: 1px; height: 24px; background: var(--line); }
 @media (max-width: 760px) { .dbar { bottom: calc(70px + env(safe-area-inset-bottom, 0px)); } }
+
+/* ---------- 小字註記：條文上方／下方（interlinear） ---------- */
+.ann-hold { white-space: nowrap; }
+.ann-pin { display: inline-block; position: relative; width: 0; height: 0; vertical-align: 0; text-indent: 0; }
+.ann-note {
+  position: absolute; left: 0; z-index: 1; display: block;
+  width: -webkit-max-content; width: max-content;
+  text-indent: 0; white-space: normal; letter-spacing: 0; text-align: left;
+  cursor: pointer; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  touch-action: manipulation;
+}
+.ann-pin-b .ann-note { bottom: 0; }
+.ann-pin-a .ann-note { top: 0; }
+.ann-note::after {
+  content: attr(data-t); display: block;
+  color: var(--ann);
+  font-family: -apple-system, "PingFang TC", "Noto Sans TC", sans-serif;
+  font-size: .62em; font-weight: 600; line-height: 1.35;
+  white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+}
+.ann-note:active::after { background: var(--accent-soft); border-radius: 3px; }
+.ann-sys .ann-note::after, .ann.ann-sys::after { content: "編按：" attr(data-t); font-weight: 500; }
+.ann-mark { cursor: pointer; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; padding: 0 .12em; }
+.ann-mark::after {
+  content: "註"; color: var(--ann); font-family: -apple-system, "PingFang TC", sans-serif;
+  font-size: .5em; font-weight: 700; line-height: 1; vertical-align: super;
+  padding: .08em .18em; border: 1px solid var(--ann); border-radius: 4px;
+}
+.annu[data-ann] { cursor: pointer; }
+.ann { -webkit-touch-callout: none; }
+#btnAnn { position: relative; font-weight: 800; font-size: 16px; color: var(--red); font-family: -apple-system, "PingFang TC", sans-serif; }
+#btnAnn.off { color: var(--ink-3); }
+#btnAnn.off::after { content: ""; position: absolute; left: 9px; right: 9px; top: 50%; border-top: 2px solid currentColor; transform: rotate(-35deg); }
+.art-tools .ann-tog { color: var(--red); }
+.ann-list { margin-top: 12px; }
+.ann-list h4 { margin: 0 0 6px; font-size: 14px; color: var(--ink-2); }
+.ann-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 0; border-top: 1px dashed var(--line); font-size: 14px; }
+.ann-row .q { color: var(--ink-2); }
+.ann-row .sp { flex: 1; }
+.ann-row .ann-inline { margin-left: 0; }
+
+/* ---------- 引用條文（含其他法律）小字 ---------- */
+.xref.on { background: var(--accent-soft); border-radius: 3px; }
+.xref-ext { color: var(--green); border-bottom-color: var(--green); }
+.ref-peek {
+  position: relative; margin: .25em 0 .45em 1.6em; padding: .45em 2em .45em .7em;
+  border-left: 3px solid var(--accent-2); background: var(--accent-soft); border-radius: 0 8px 8px 0;
+  font-family: -apple-system, "PingFang TC", "Noto Sans TC", sans-serif;
+  font-size: max(12.5px, calc(var(--fs) * .7)); line-height: 1.6; color: var(--ink-2); letter-spacing: 0;
+  -webkit-user-select: text; user-select: text;
+}
+.ref-peek .pk-b + .pk-b { margin-top: .5em; padding-top: .4em; border-top: 1px dashed var(--line); }
+.ref-peek .pk-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; color: var(--accent); margin-bottom: 2px; }
+.ref-peek .pk-h a, .ref-peek .pk-h .linkish { font-size: .9em; color: var(--accent-2); background: none; border: 0; padding: 0; margin-left: auto; text-decoration: none; }
+.ref-peek .pk-w { color: var(--ink-3); }
+.ref-peek .pk-why { color: var(--ink-3); font-size: .92em; margin-bottom: 2px; }
+.ref-peek .pk-ln { margin: 0; }
+.ref-peek .pk-ln.item { padding-left: 2.6em; text-indent: -2em; }
+.ref-peek .pk-ln.sub { padding-left: 3.6em; text-indent: -2.4em; }
+.ref-peek .pk-ln.on { color: var(--ink); background: var(--hl-y); border-radius: 3px; }
+.ref-peek .pk-no { color: var(--ink-3); font-family: "Times New Roman", serif; margin-right: .35em; }
+.ref-peek .pk-x { position: absolute; right: 4px; top: 4px; width: 28px; height: 28px; border: 0; border-radius: 50%; background: transparent; color: var(--ink-3); font-size: 13px; }
+.rel-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: .6em; padding-top: .5em; border-top: 1px dashed var(--line); font-family: -apple-system, "PingFang TC", sans-serif; font-size: 13px; }
+.rel-row .rel-h { color: var(--ink-3); font-weight: 600; margin-right: 2px; }
+.rel { border: 1px solid var(--line); background: var(--bg); color: var(--green); border-radius: 999px; padding: 3px 10px; font-size: 13px; line-height: 1.4; }
+.rel small { color: var(--ink-3); margin-left: 4px; font-size: 11.5px; }
+.rel sub { font-size: 10px; margin-left: 1px; }
+.rel.on { background: var(--accent-soft); border-color: var(--accent-2); }
+.void-note.info { border-left-color: var(--accent-2); background: var(--accent-soft); }
+.badge.b-w { background: rgba(106, 50, 168, .12); color: var(--ann-v); border-color: transparent; }
+.badge.b-info { background: var(--accent-soft); color: var(--accent-2); border-color: transparent; }
+.t-W { background: rgba(106, 50, 168, .12); color: var(--ann-v); }
+.law-head .intro { margin-top: 8px; line-height: 1.6; }

@@ -1,6 +1,7 @@
-/* 勞基法法典 — app.js
- * 純前端、無相依套件。所有使用者資料（註記、螢光、手寫、書籤、自訂判決函釋）
- * 存在本機 IndexedDB（失敗時退回 localStorage），可於「設定」匯出 / 匯入備份。
+/* 法典 App（勞基法法典、團體協約法典共用）— app.js
+ * 純前端、無相依套件。資料檔（window.LSA_DATA）決定是哪一部法典；
+ * 所有使用者資料（註記、螢光、手寫、書籤、自訂判決函釋）存在本機 IndexedDB
+ * （失敗時退回 localStorage），可於「設定」匯出 / 匯入備份。
  */
 (function () {
   'use strict';
@@ -12,15 +13,24 @@
   const h = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
   const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
+  // per-codex configuration (defaults = 勞基法法典, the original app)
+  const APP = Object.assign({
+    id: 'lsa-codex', db: 'lsa-codex', short: '勞基法法典',
+    annPos: 'i', refTap: 'jump', flags: {}, notes: {},
+    enact: '民國 73 年 7 月 30 日制定公布',
+    disclaimer: '條文、歷次修正條文與大法官解釋取自法務部全國法規資料庫；判決要旨係摘錄自司法院裁判書系統中法院引用之文字，函釋則為法院判決中引用之主管機關函號與內容摘錄，僅供學習參考，實際引用請以原文為準。個人註記僅儲存在本裝置，請定期於「設定」匯出備份。',
+    others: [],
+  }, D.app || {});
+
   /* ------------------------------------------------------------------ *
    * storage: IndexedDB key/value with in-memory cache
    * ------------------------------------------------------------------ */
   const Store = {
-    cache: new Map(), db: null, mode: 'memory', LS: 'lsa-codex:',
+    cache: new Map(), db: null, mode: 'memory', LS: APP.db + ':',
     async init() {
       try {
         this.db = await new Promise((res, rej) => {
-          const r = indexedDB.open('lsa-codex', 1);
+          const r = indexedDB.open(APP.db, 1);
           r.onupgradeneeded = () => r.result.createObjectStore('kv');
           r.onsuccess = () => res(r.result);
           r.onerror = () => rej(r.error);
@@ -81,6 +91,7 @@
   // article → amendment list
   const ART_CHANGES = new Map();
   D.amendments.forEach((am) => am.changes.forEach((c) => {
+    if (!c.no) return; // 舊法條文刪除、無對應新條文
     if (!ART_CHANGES.has(c.no)) ART_CHANGES.set(c.no, []);
     ART_CHANGES.get(c.no).push({ am, c });
   }));
@@ -90,8 +101,8 @@
     const cur = ART.get(no);
     if (!list.length) return [{ date: D.amendments[0].date, lines: cur ? cur.lines : [], kind: '制定' }];
     const out = [];
-    if (list[0].c.type !== 'add') out.push({ date: D.amendments[0].date, lines: list[0].c.old, kind: '制定' });
-    list.forEach(({ am, c }) => out.push({ date: am.date, lines: c.new, kind: c.type === 'add' ? '增訂' : c.type === 'del' ? '刪除' : '修正' }));
+    if (list[0].c.type !== 'add') out.push({ date: D.amendments[0].date, lines: list[0].c.old, kind: '制定', oldNos: list[0].c.oldNos });
+    list.forEach(({ am, c }) => out.push({ date: am.date, lines: c.new, kind: c.type === 'add' ? '增訂' : c.type === 'del' ? '刪除' : am.full ? '全文修正' : '修正' }));
     return out;
   }
 
@@ -100,14 +111,16 @@
     ...D.interps.map((j) => ({ id: j.id, type: 'J', title: j.title, date: j.date, topic: j.issue, summary: j.holding, arts: j.arts, url: j.url, src: '全國法規資料庫' })),
     ...(D.cases || []),
   ];
-  const TYPE_NAME = { J: '大法官解釋', S: '判決', A: '函釋', O: '其他' };
+  const TYPE_NAME = { J: '大法官解釋', S: '判決', W: '裁決', A: '函釋', O: '其他' };
+  const TYPES = ['J', 'S', 'W', 'A', 'O'];
+  const oldLabel = (nos) => `原第${nos.map(shortLabel).join('、')}條`;
   function allCases() { return [...BUILTIN_CASES, ...Store.get('ucases', [])]; }
   function casesFor(no) { return allCases().filter((c) => (c.arts || []).includes(no)); }
 
   /* ------------------------------------------------------------------ *
    * settings
    * ------------------------------------------------------------------ */
-  const DEFAULTS = { showDoodle: true, showAnn: true, fs: 19, font: 'sans', theme: 'auto', pno: 'roman', pencilOnly: true, showNotes: true, showInk: true, xref: true };
+  const DEFAULTS = { showDoodle: true, showAnn: true, fs: 19, font: 'sans', theme: 'auto', pno: 'roman', pencilOnly: true, showNotes: true, showInk: true, xref: true, annTap: 'both', refTap: APP.refTap, refAll: false };
   let S = {};
   function loadSettings() { S = Object.assign({}, DEFAULTS, Store.get('settings', {})); applySettings(); }
   function saveSettings() { Store.set('settings', S); applySettings(); }
@@ -131,50 +144,101 @@
     }
     return n + cur;
   }
-  const XREF_RE = /第([〇一二三四五六七八九十百]+)條(?:之([一二三四五六七八九十]+))?/g;
-  function xrefs(text, selfNo) {
+
+  /* 引用條文：本法「第○條」「前條」與資料檔內附條文之其他法律（如工會法第○條） */
+  const NUM = '[〇一二三四五六七八九十百]+';
+  const REF_LAWS = D.refLaws || {};
+  const LAW_KEY = new Map(Object.entries(REF_LAWS).map(([k, v]) => [v.name, k]));
+  const lawName = (k) => (k ? REF_LAWS[k].name : D.meta.name);
+  const EXT_RE = LAW_KEY.size ? new RegExp(`(${[...LAW_KEY.keys()].join('|')})第(${NUM})條(?:之(${NUM}))?(?:第(${NUM})項)?(?:第(${NUM})款)?`, 'g') : null;
+  const XREF_RE = new RegExp(`第(${NUM})條(?:之(${NUM}))?(?:第(${NUM})項)?(?:第(${NUM})款)?`, 'g');
+  const PREV_RE = new RegExp(`前([二三四五])?條(?:第(${NUM})項)?(?:第(${NUM})款)?`, 'g');
+  const refArt = (law, no) => (law ? (REF_LAWS[law] && REF_LAWS[law].arts[no]) : ART.get(no)?.lines);
+  const REF_BY_NO = new Map(); // article no -> [{key, s, e, t:[{law,no,p,k}], why}]
+
+  function xrefs(text, selfNo, li) {
     const out = [];
     if (!S.xref) return out;
+    const taken = (s, e) => out.some((r) => s < r.e && e > r.s);
+    const push = (s, e, t) => { if (!taken(s, e)) out.push({ s, e, t }); };
+    ((D.links || {})[selfNo] || []).forEach((k) => { if (k.l === li) push(k.s, k.e, k.refs.map(([law, no, p, kk]) => ({ law, no, p: p || 0, k: kk || 0 }))); });
     let m;
+    if (EXT_RE) {
+      EXT_RE.lastIndex = 0;
+      while ((m = EXT_RE.exec(text))) {
+        const law = LAW_KEY.get(m[1]);
+        const no = cn2n(m[2]) + (m[3] ? '-' + cn2n(m[3]) : '');
+        if (refArt(law, no)) push(m.index, m.index + m[0].length, [{ law, no, p: m[4] ? cn2n(m[4]) : 0, k: m[5] ? cn2n(m[5]) : 0 }]);
+      }
+    }
     XREF_RE.lastIndex = 0;
     while ((m = XREF_RE.exec(text))) {
       const pre = text.slice(Math.max(0, m.index - 6), m.index);
       if (/(?:條例|規則|細則|辦法|標準|民法|刑法|同法|該法|[^本]法)$/.test(pre)) continue;
       const no = cn2n(m[1]) + (m[2] ? '-' + cn2n(m[2]) : '');
       if (!ART.has(no) || no === selfNo) continue;
-      out.push({ s: m.index, e: m.index + m[0].length, no });
+      push(m.index, m.index + m[0].length, [{ law: '', no, p: m[3] ? cn2n(m[3]) : 0, k: m[4] ? cn2n(m[4]) : 0 }]);
     }
-    return out;
+    {
+      PREV_RE.lastIndex = 0;
+      const i0 = ORDER.get(selfNo);
+      while ((m = PREV_RE.exec(text))) {
+        const k = m[1] ? cn2n(m[1]) : 1;
+        if (i0 == null || i0 - k < 0) continue;
+        push(m.index, m.index + m[0].length, ARTS.slice(i0 - k, i0).map((a) => ({ law: '', no: a.no, p: k === 1 && m[2] ? cn2n(m[2]) : 0, k: k === 1 && m[3] ? cn2n(m[3]) : 0 })));
+      }
+    }
+    return out.sort((a, b) => a.s - b.s).map((r, i) => Object.assign(r, { key: li + ':' + i }));
   }
 
   function renderLineHTML(text, { hls = [], refs = [], hits = [], anns = [] }) {
     const n = text.length;
     if (!n) return '';
-    // anns: [{s, e, c, t, idx, end}] — underline s..e; when end=true, show the note after e
+    // anns: [{s, e, c, t, id, pos:'a'|'b'|'i', first, end, collapsed, sys}]
     const und = new Array(n).fill('');
-    const ins = new Map();
+    const ins = new Map(), pins = new Map();
+    const add = (m, p, x) => { if (!m.has(p)) m.set(p, []); m.get(p).push(x); };
     anns.forEach((a) => {
-      for (let i = Math.max(0, a.s); i < Math.min(n, a.e); i++) und[i] = a.c;
-      if (a.end) { const p = Math.min(n, Math.max(0, a.e)); if (!ins.has(p)) ins.set(p, []); ins.get(p).push(a); }
+      for (let i = Math.max(0, a.s); i < Math.min(n, a.e); i++) und[i] = a.c + '|' + a.id;
+      const endP = Math.min(n, Math.max(0, a.e));
+      const sys = a.sys ? ' ann-sys' : '';
+      if (a.collapsed) {
+        if (a.end) add(ins, endP, `<span class="ann-mark ann-${a.c}${sys}" data-ann="${a.id}" role="button" aria-label="顯示註記"></span>`);
+      } else if (a.pos === 'a' || a.pos === 'b') {
+        if (a.first) add(pins, Math.min(n - 1, Math.max(0, a.s)), `<span class="ann-pin ann-pin-${a.pos} ann-${a.c}${sys}"><span class="ann-note" data-ann="${a.id}" data-t="${esc(a.t)}" role="button" aria-label="註記：${esc(a.t)}"></span></span>`);
+      } else if (a.end) {
+        add(ins, endP, `<span class="ann ann-${a.c}${sys}" data-ann="${a.id}" data-t="${esc(a.t)}" role="button" aria-label="註記：${esc(a.t)}"></span>`);
+      }
     });
-    const annHTML = (p) => (ins.get(p) || []).map((a) => `<span class="ann ann-${a.c}" data-ann="${a.idx}" data-t="${esc(a.t)}" role="button" aria-label="註記：${esc(a.t)}"></span>`).join('');
     const col = new Array(n).fill('');
     hls.forEach((r) => { for (let i = Math.max(0, r.s); i < Math.min(n, r.e); i++) col[i] = r.c; });
     const ref = new Array(n).fill(null);
     refs.forEach((r) => { for (let i = r.s; i < r.e; i++) ref[i] = r; });
     const hit = new Array(n).fill(false);
     hits.forEach((r) => { for (let i = r.s; i < r.e; i++) hit[i] = true; });
-    let html = annHTML(0), i = 0;
-    while (i < n) {
-      let j = i + 1;
-      while (j < n && col[j] === col[i] && ref[j] === ref[i] && hit[j] === hit[i] && und[j] === und[i] && !ins.has(j)) j++;
+    const brk = new Set([...ins.keys(), ...pins.keys(), ...[...pins.keys()].map((p) => p + 1)]);
+    const wrap = (i, j) => {
       let seg = esc(text.slice(i, j));
       if (hit[i]) seg = `<mark class="h h-hit">${seg}</mark>`;
       if (col[i]) seg = `<mark class="h h-${col[i]}">${seg}</mark>`;
-      if (und[i]) seg = `<span class="annu annu-${und[i]}">${seg}</span>`;
-      if (ref[i]) seg = `<a class="xref" data-go="${ref[i].no}">${seg}</a>`;
-      html += seg + annHTML(j); i = j;
+      if (und[i]) { const [c, id] = und[i].split('|'); seg = `<span class="annu annu-${c}" data-ann="${id}">${seg}</span>`; }
+      const r = ref[i];
+      if (r) {
+        const jump = r.t.length === 1 && !r.t[0].law && S.refTap !== 'peek';
+        seg = jump ? `<a class="xref" data-go="${r.t[0].no}">${seg}</a>` : `<a class="xref${r.t[0].law ? ' xref-ext' : ''}" data-ref="${r.key}">${seg}</a>`;
+      }
+      return seg;
+    };
+    let html = '', i = 0;
+    while (i < n) {
+      if (ins.has(i)) html += ins.get(i).join('');
+      let j = i + 1;
+      while (j < n && !brk.has(j) && col[j] === col[i] && ref[j] === ref[i] && hit[j] === hit[i] && und[j] === und[i]) j++;
+      const seg = wrap(i, j);
+      html += pins.has(i) ? `<span class="ann-hold">${pins.get(i).join('')}${seg}</span>` : seg;
+      i = j;
     }
+    if (ins.has(n)) html += ins.get(n).join('');
     return html;
   }
 
@@ -196,19 +260,73 @@
 
   function articleBodyHTML(a, hitQ) {
     const hl = Store.get('hl:' + a.no, []);
-    const ann = S.showAnn ? Store.get('ann:' + a.no, []) : [];
+    const anns = annList(a.no);
     const paras = a.lines.filter((l) => l.i === 0).length;
+    const refList = [];
+    REF_BY_NO.set(a.no, refList);
     let p = 0;
-    return a.lines.map((l, li) => {
+    const body = a.lines.map((l, li) => {
       const cls = lineClass(l);
       let pno = '';
       if (cls === 'para') {
         p++;
         if (paras > 1 && S.pno !== 'none') pno = `<span class="pno" aria-hidden="true">${PNO[S.pno][p - 1] || p}</span>`;
       }
-      const inner = renderLineHTML(l.t, { hls: hl.filter((r) => r.l === li), refs: xrefs(l.t, a.no), hits: findHits(l.t, hitQ), anns: annsForLine(ann, li) });
+      const refs = xrefs(l.t, a.no, li);
+      refList.push(...refs);
+      const inner = renderLineHTML(l.t, { hls: hl.filter((r) => r.l === li), refs, hits: findHits(l.t, hitQ), anns: annsForLine(a.no, anns, li) });
       return `<p class="ln ${cls}${cls === 'para' && (paras <= 1 || S.pno === 'none') ? ' single' : ''}" data-li="${li}">${pno}<span class="lt">${inner}</span></p>`;
     }).join('');
+    const rel = S.xref ? (D.related || {})[a.no] || [] : [];
+    rel.forEach((r, i) => refList.push({ key: 'r:' + i, t: [{ law: r.law, no: r.no, p: r.p || 0, k: r.k || 0 }], why: r.why }));
+    const relHTML = rel.length ? `<div class="rel-row"><span class="rel-h">相關法條</span>${rel.map((r, i) => `<button class="rel" data-ref="r:${i}">${esc(r.law ? REF_LAWS[r.law].short || REF_LAWS[r.law].name : '本法')} ${shortLabel(r.no)}${r.p ? `<sub>${PNO.roman[r.p - 1] || r.p}</sub>` : ''}${r.why ? `<small>${esc(r.why)}</small>` : ''}</button>`).join('')}</div>` : '';
+    return body + relHTML;
+  }
+
+  /* ---------- 引用條文小字（點選展開） ---------- */
+  const openPeeks = new Map(), closedPeeks = new Map(); // no -> Set(key)
+  const peekIsOpen = (no, key) => (S.refAll ? !(closedPeeks.get(no) || new Set()).has(key) : (openPeeks.get(no) || new Set()).has(key));
+  function togglePeek(no, key) {
+    const m = S.refAll ? closedPeeks : openPeeks;
+    if (!m.has(no)) m.set(no, new Set());
+    const st = m.get(no);
+    st.has(key) ? st.delete(key) : st.add(key);
+    const body = document.querySelector(`#a-${CSS.escape(no)} .art-body`);
+    if (body) { renderPeeks(body); Doodle.redrawBody(body); }
+  }
+  function peekBlock(t) {
+    const lines = refArt(t.law, t.no) || [];
+    const paras = lines.filter((l) => l.i === 0).length;
+    const tp = t.p || (t.k ? 1 : 0);
+    let p = 0, k = 0;
+    const body = lines.map((l) => {
+      if (l.i === 0) { p++; k = 0; } else if (l.i < 6) k++;
+      const on = tp && p === tp && (!t.k || (l.i !== 0 && l.i < 6 && k === t.k));
+      const pno = l.i === 0 && paras > 1 ? `<b class="pk-no">${PNO.roman[p - 1] || p}</b>` : '';
+      return `<p class="pk-ln ${lineClass(l)}${on ? ' on' : ''}">${pno}${esc(l.t)}</p>`;
+    }).join('');
+    const where = `${t.p ? `第${t.p}項` : ''}${t.k ? `第${t.k}款` : ''}`;
+    const law = t.law ? REF_LAWS[t.law] : null;
+    const link = law ? (law.pcode ? `<a href="https://law.moj.gov.tw/LawClass/LawSingle.aspx?pcode=${law.pcode}&flno=${encodeURIComponent(t.no)}" target="_blank" rel="noopener">全國法規資料庫 ↗</a>` : '') : `<button class="linkish" data-go="${t.no}">前往${label(t.no)} →</button>`;
+    return `<div class="pk-b"><div class="pk-h"><b>${esc(lawName(t.law))}${label(t.no)}</b>${where ? `<span class="pk-w">（${where}）</span>` : ''}${link}</div>${body || '<p class="pk-ln muted">（條文未收錄）</p>'}</div>`;
+  }
+  function renderPeeks(body) {
+    const no = body.dataset.no;
+    $$('.ref-peek', body).forEach((x) => x.remove());
+    $$('.xref.on, .rel.on', body).forEach((x) => x.classList.remove('on'));
+    const after = new Map();
+    (REF_BY_NO.get(no) || []).forEach((r) => {
+      if (!peekIsOpen(no, r.key)) return;
+      const anchor = r.key.startsWith('r:') ? body.querySelector('.rel-row') : body.querySelector(`.ln[data-li="${r.key.split(':')[0]}"]`);
+      if (!anchor) return;
+      $$(`[data-ref="${r.key}"]`, body).forEach((x) => x.classList.add('on'));
+      const el = h(`<div class="ref-peek" data-key="${r.key}">
+        <button class="pk-x" data-act="close-peek" aria-label="收合">✕</button>
+        ${r.why ? `<div class="pk-why">${esc(r.why)}</div>` : ''}${r.t.map(peekBlock).join('')}</div>`);
+      const prev = after.get(anchor) || anchor;
+      prev.after(el);
+      after.set(anchor, el);
+    });
   }
 
   /* ------------------------------------------------------------------ *
@@ -220,46 +338,102 @@
     return !!(Store.get('note:' + no) || Store.get('hl:' + no) || Store.get('ink:' + no) || Store.get('ann:' + no) || Store.get('doodle:' + no));
   }
 
-  // inline annotation on the article text: {r:[{l,s,e}], t: text, c: 'r'|'n'|'g'|'v'}
-  function annsForLine(list, li) {
+  /* 條文上的小字註記：{r:[{l,s,e}], t: 文字, c: 'r'|'n'|'g'|'v', p: 'a'(上方)|'b'(下方)|'i'(文字後), h: 已隱藏}
+   * 內建註記（APP.notes，依官方沿革整理）同樣顯示，可隱藏但不可編輯。 */
+  const peek = new Set(); // 全部隱藏時，暫時點開的註記
+  function annList(no) {
+    const user = Store.get('ann:' + no, []).map((a, i) => ({ ...a, id: String(i) }));
+    const sysH = Store.get('sysHidden', []);
+    const sys = (APP.notes[no] || []).map((a, j) => ({ ...a, c: a.c || 'r', id: 's' + j, sys: true, h: sysH.includes(no + '|s' + j) }));
+    return [...user, ...sys];
+  }
+  const annVisible = (no, a) => (S.showAnn ? !a.h : peek.has(no + '|' + a.id));
+  function annsForLine(no, list, li) {
     const out = [];
-    list.forEach((a, idx) => {
-      const last = a.r[a.r.length - 1];
-      a.r.forEach((rg) => { if (rg.l === li) out.push({ s: rg.s, e: rg.e, c: a.c, t: a.t, idx, end: rg === last }); });
+    list.forEach((a) => {
+      const first = a.r[0], last = a.r[a.r.length - 1];
+      const collapsed = !annVisible(no, a);
+      a.r.forEach((rg) => { if (rg.l === li) out.push({ s: rg.s, e: rg.e, c: a.c, t: a.t, id: a.id, sys: a.sys, pos: a.p || APP.annPos, first: rg === first, end: rg === last, collapsed }); });
     });
     return out;
   }
+  function toggleAnn(no, id) {
+    const k = no + '|' + id;
+    if (!S.showAnn) { peek.has(k) ? peek.delete(k) : peek.add(k); }
+    else if (id[0] === 's') {
+      const hs = new Set(Store.get('sysHidden', []));
+      hs.has(k) ? hs.delete(k) : hs.add(k);
+      Store.set('sysHidden', [...hs]);
+    } else {
+      const list = Store.get('ann:' + no, []).slice();
+      const a = list[+id];
+      if (!a) return;
+      const nu = { ...a };
+      if (a.h) delete nu.h; else nu.h = true;
+      list[+id] = nu;
+      Store.set('ann:' + no, list);
+    }
+    refreshArticle(no);
+  }
+  // 本條註記全部顯示／隱藏
+  function setAnnsAll(no, hide) {
+    if (!S.showAnn) { annList(no).forEach((a) => (hide ? peek.delete(no + '|' + a.id) : peek.add(no + '|' + a.id))); refreshArticle(no); return; }
+    const list = Store.get('ann:' + no, []).map((a) => { const x = { ...a }; if (hide) x.h = true; else delete x.h; return x; });
+    if (list.length) Store.set('ann:' + no, list);
+    const hs = new Set(Store.get('sysHidden', []));
+    (APP.notes[no] || []).forEach((_, j) => (hide ? hs.add(no + '|s' + j) : hs.delete(no + '|s' + j)));
+    Store.set('sysHidden', [...hs]);
+    refreshArticle(no);
+  }
   const ANN_COLORS = [['r', '紅'], ['n', '深藍'], ['g', '綠'], ['v', '紫']];
+  const ANN_POS = [['a', '文字上方'], ['b', '文字下方'], ['i', '接在文字後']];
   function annQuote(no, a) {
     const art = ART.get(no);
     return a.r.map((rg) => (art.lines[rg.l] || { t: '' }).t.slice(rg.s, rg.e)).join('…');
   }
   function editAnn(no, idx, ranges) {
+    if (idx != null && String(idx)[0] === 's') { sysAnnDialog(no, String(idx)); return; }
+    if (idx != null) idx = +idx;
     const list = Store.get('ann:' + no, []).slice();
     const isNew = idx == null;
-    const a = isNew ? { r: ranges, t: '', c: Store.get('annColor', 'r') } : { ...list[idx] };
+    const a = isNew ? { r: ranges, t: '', c: Store.get('annColor', 'r'), p: Store.get('annPos', APP.annPos) } : { ...list[idx] };
     if (!a || !a.r) return;
-    let color = a.c;
+    let color = a.c, pos = a.p || APP.annPos;
     const body = h(`<div>
       <p class="muted" style="margin-top:0">${label(no)}：「${esc(annQuote(no, a))}」</p>
-      <div class="field"><label for="annText">註記文字（以小字顯示在這段條文後面）</label><textarea id="annText" style="min-height:90px">${esc(a.t)}</textarea></div>
-      <div class="field"><label>顏色</label><span class="seg">${ANN_COLORS.map(([k, t]) => `<button data-c="${k}" class="${k === color ? 'on' : ''}"><span class="ann-dot ann-${k}"></span>${t}</button>`).join('')}</span></div>
+      <div class="field"><label for="annText">註記文字（以小字顯示在這段條文的上方或下方）</label><textarea id="annText" style="min-height:90px">${esc(a.t)}</textarea></div>
+      <div class="field"><label>位置</label><span class="seg" data-g="pos">${ANN_POS.map(([k, t]) => `<button data-p="${k}" class="${k === pos ? 'on' : ''}">${t}</button>`).join('')}</span></div>
+      <div class="field"><label>顏色</label><span class="seg" data-g="c">${ANN_COLORS.map(([k, t]) => `<button data-c="${k}" class="${k === color ? 'on' : ''}"><span class="ann-dot ann-${k}"></span>${t}</button>`).join('')}</span></div>
+      <p class="muted">提示：用手指或 Apple Pencil 點一下註記（或畫底線的文字）即可隱藏／顯示；長按註記可再編輯。</p>
     </div>`);
-    body.querySelector('.seg').onclick = (e) => { const b = e.target.closest('[data-c]'); if (!b) return; color = b.dataset.c; $$('.seg button', body).forEach((x) => x.classList.toggle('on', x === b)); };
+    body.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.c) color = b.dataset.c;
+      if (b.dataset.p) pos = b.dataset.p;
+      $$('.seg button', b.closest('.seg')).forEach((x) => x.classList.toggle('on', x === b));
+    });
     const btns = [{ text: '取消', fn: () => {} }];
     if (!isNew) btns.push({ text: '刪除', cls: 'danger', fn: () => { list.splice(idx, 1); Store.set('ann:' + no, list); refreshArticle(no); toast('已刪除註記'); } });
     btns.push({ text: '儲存', cls: 'primary', fn: () => {
       const t = $('#annText', body).value.trim();
       if (!t) { toast('請輸入註記文字'); return false; }
-      const item = { r: a.r, t, c: color };
+      const item = { r: a.r, t, c: color, p: pos };
       if (isNew) list.push(item); else list[idx] = item;
       list.sort((x, y) => x.r[0].l - y.r[0].l || x.r[0].s - y.r[0].s);
       Store.set('ann:' + no, list);
       Store.set('annColor', color);
+      Store.set('annPos', pos);
       refreshArticle(no);
     } });
     openDialog(isNew ? '在條文上加註' : '編輯條文註記', body, btns);
     setTimeout(() => { const ta = $('#annText', body); if (ta) ta.focus(); }, 60);
+  }
+  function sysAnnDialog(no, id) {
+    const a = annList(no).find((x) => x.id === id);
+    if (!a) return;
+    const body = h(`<div><p class="muted" style="margin-top:0">${label(no)}：「${esc(annQuote(no, a))}」</p><p class="ann-inline ann-${a.c}" style="margin-left:0">${esc(a.t)}</p>${a.src ? `<p class="muted">資料來源：${esc(a.src)}</p>` : ''}<p class="muted">這是內建註記，無法編輯；點一下註記即可隱藏或顯示。</p></div>`);
+    openDialog('內建註記', body, [{ text: a.h ? '顯示' : '隱藏', fn: () => toggleAnn(no, id) }, { text: '關閉', cls: 'primary', fn: () => {} }]);
   }
 
   function badgesHTML(a) {
@@ -268,37 +442,40 @@
     if (ch.length) {
       const last = ch[ch.length - 1];
       const isNew = ch[0].c.type === 'add';
-      b.push(`<span class="badge clickable ${isNew && ch.length === 1 ? 'b-new' : 'b-amend'}" data-tab="hist">${isNew && ch.length === 1 ? '增訂' : '修正'} ${last.am.roc}</span>`);
+      b.push(`<span class="badge clickable ${isNew && ch.length === 1 ? 'b-new' : 'b-amend'}" data-tab="hist">${isNew && ch.length === 1 ? '增訂' : last.am.full ? '全文修正' : '修正'} ${last.am.roc}</span>`);
     }
     const cs = casesFor(a.no);
-    const nJ = cs.filter((c) => c.type === 'J').length, nS = cs.filter((c) => c.type === 'S').length, nA = cs.filter((c) => c.type === 'A').length, nO = cs.filter((c) => c.type === 'O').length;
-    if (nJ) b.push(`<span class="badge b-j clickable" data-tab="cases" data-f="J">釋 ${nJ}</span>`);
-    if (nS) b.push(`<span class="badge clickable" data-tab="cases" data-f="S">判 ${nS}</span>`);
-    if (nA) b.push(`<span class="badge clickable" data-tab="cases" data-f="A">函 ${nA}</span>`);
-    if (nO) b.push(`<span class="badge clickable" data-tab="cases" data-f="O">其他 ${nO}</span>`);
-    if (a.no === '49') b.push(`<span class="badge b-warn">第1項經釋字807失效</span>`);
+    const NB = { J: ['釋', 'b-j'], S: ['判', ''], W: ['裁', 'b-w'], A: ['函', ''], O: ['其他', ''] };
+    TYPES.forEach((t) => { const n = cs.filter((c) => c.type === t).length; if (n) b.push(`<span class="badge clickable ${NB[t][1]}" data-tab="cases" data-f="${t}">${NB[t][0]} ${n}</span>`); });
+    const f = APP.flags[a.no];
+    if (f && f.badge) b.push(`<span class="badge ${f.cls || 'b-warn'}">${esc(f.badge)}</span>`);
     return b.join('');
   }
 
   function renderArticle(a, opts = {}) {
     const starred = Store.get('stars', []).includes(a.no);
+    const nAnn = annList(a.no).length;
     const el = h(`<article class="art" id="a-${a.no}" data-no="${a.no}">
       <div class="art-head">
         <span class="art-no">${label(a.no)}</span>
         <div class="badges">${badgesHTML(a)}</div>
         <div class="art-tools">
+          ${nAnn ? `<button class="icon-btn ann-tog" data-act="anns" title="本條註記全部顯示／隱藏"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.6"/></svg></button>` : ''}
           <button class="icon-btn ${starred ? 'on' : ''}" data-act="star" title="書籤"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></svg></button>
           <button class="icon-btn" data-act="detail" title="註記／判解／沿革"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg></button>
         </div>
       </div>
       <div class="art-body" data-no="${a.no}">${articleBodyHTML(a, opts.hit)}</div>
     </article>`);
-    if (a.no === '49') {
-      el.querySelector('.art-body').append(h(`<div class="void-note">司法院釋字第807號解釋（110.08.20）：本條第1項規定違反憲法第7條保障性別平等之意旨，應自解釋公布之日起失其效力。</div>`));
-    }
+    const body = el.querySelector('.art-body');
+    const f = APP.flags[a.no];
+    if (f && f.note) body.append(h(`<div class="void-note${f.cls === 'b-info' ? ' info' : ''}">${esc(f.note)}</div>`));
+    if (body.querySelector('.ann-pin')) body.classList.add('has-pins');
+    renderPeeks(body);
     appendPreviews(el, a.no);
-    Doodle.observe(el.querySelector('.art-body'));
+    Doodle.observe(body);
     if (openDetail.has(a.no)) el.append(renderDetail(a.no, openDetail.get(a.no)));
+    AnnLayout.queue(body);
     return el;
   }
 
@@ -318,6 +495,54 @@
       requestAnimationFrame(() => InkPad.renderPreview(p.querySelector('canvas'), ink));
     }
   }
+
+  /* ---------- 上／下方小字註記的排版：pin 為零寬 inline-block，以 vertical-align 撐開該行行距 ---------- */
+  const AnnLayout = (() => {
+    const dirty = new Set();
+    let raf = 0;
+    function queue(body) {
+      if (body) dirty.add(body); else $$('#view-law .art-body.has-pins').forEach((b) => dirty.add(b));
+      if (!raf) raf = requestAnimationFrame(flush);
+    }
+    function flush() { raf = 0; const list = [...dirty]; dirty.clear(); list.forEach(layout); }
+    function layout(body) {
+      if (!body.isConnected) return;
+      const pins = $$('.ann-pin', body);
+      if (!pins.length) return;
+      const cs = getComputedStyle(body);
+      const fs = parseFloat(cs.fontSize) || 19;
+      const br = body.getBoundingClientRect();
+      if (!br.width) { dirty.add(body); return; }
+      const cl = br.left + parseFloat(cs.paddingLeft), cr = br.right - parseFloat(cs.paddingRight);
+      const cw = cr - cl;
+      pins.forEach((p) => { p.style.verticalAlign = ''; const n = p.firstElementChild; n.style.left = '0px'; n.style.width = ''; n.style.maxWidth = cw + 'px'; });
+      const items = pins.map((p) => { const r = p.getBoundingClientRect(); const n = p.firstElementChild; return { p, n, x: r.left, y: Math.round(r.top), side: p.classList.contains('ann-pin-a') ? 'a' : 'b', w: Math.ceil(n.getBoundingClientRect().width) + 1 }; });
+      items.sort((a, b) => a.y - b.y || a.x - b.x);
+      const rows = new Map();
+      const minW = fs * 6.6;
+      items.forEach((it) => {
+        const key = it.side + it.y;
+        if (!rows.has(key)) rows.set(key, []);
+        const placed = rows.get(key);
+        const avail = cr - it.x;
+        let L = it.x, w = Math.min(it.w, cw);
+        if (w > avail) {
+          if (avail >= Math.min(w, minW)) w = avail;
+          else { w = Math.min(w, minW); L = Math.max(cl, cr - w); }
+        }
+        it.n.style.maxWidth = '';
+        it.n.style.width = w + 'px';
+        it.n.style.left = (L - it.x) + 'px';
+        const H = it.n.offsetHeight;
+        const cands = [0, ...placed.map((q) => q.bot + 1)].sort((a, b) => a - b);
+        const top = cands.find((c) => placed.every((q) => q.R + 6 <= L || L + w + 6 <= q.L || c + H <= q.top || c >= q.bot));
+        placed.push({ L, R: L + w, top, bot: top + H });
+        it.p.style.verticalAlign = it.side === 'b' ? `${-(fs * 0.36 + top + H)}px` : `${fs * 0.98 + top + H}px`;
+      });
+      Doodle.redrawBody(body);
+    }
+    return { queue };
+  })();
 
   function refreshArticle(no, keepScroll = true) {
     const old = document.getElementById('a-' + no);
@@ -399,7 +624,17 @@
       b2.onclick = async () => { if (await ask('確定清除本條所有塗鴉？', '清除')) { Store.del('doodle:' + no); refreshArticle(no); updateTocMarks(); } };
       row.append(b2);
     }
-    panel.append(h(`<p class="muted">提示：在條文上長按並選取文字，可加上螢光標記，或按「加註」把小字註記直接寫在該段條文後面（紅、深藍、綠、紫）。點條文上的註記可編輯或刪除。</p>`));
+    const anns = annList(no);
+    if (anns.length) {
+      const box = h(`<div class="ann-list"><h4>條文上的小字註記（${anns.length}）</h4></div>`);
+      anns.forEach((a) => {
+        const row = h(`<div class="ann-row"><span class="q">「${esc(annQuote(no, a))}」</span><span class="ann-inline ann-${a.c}">${esc(a.t)}</span>${a.sys ? '<span class="badge">內建</span>' : ''}<span class="sp"></span><button class="btn small" data-x="tog">${annVisible(no, a) ? '隱藏' : '顯示'}</button>${a.sys ? '' : '<button class="btn small" data-x="edit">編輯</button>'}</div>`);
+        row.onclick = (e) => { const b = e.target.closest('[data-x]'); if (!b) return; if (b.dataset.x === 'tog') toggleAnn(no, a.id); else editAnn(no, +a.id); };
+        box.append(row);
+      });
+      panel.append(box);
+    }
+    panel.append(h(`<p class="muted">提示：在條文上長按並選取文字，可加上螢光標記，或按「加註」把小字註記寫在該段條文的上方或下方（紅、深藍、綠、紫）。用手指或 Apple Pencil 點一下註記即可隱藏／顯示，長按註記可編輯或刪除。</p>`));
     setTimeout(() => { if (panel.isConnected && !matchMedia('(pointer:coarse)').matches) ta.focus(); }, 50);
   }
 
@@ -434,7 +669,7 @@
 
   function panelCases(panel, no, filter) {
     const list = casesFor(no);
-    const types = ['J', 'S', 'A', 'O'].filter((t) => list.some((c) => c.type === t));
+    const types = TYPES.filter((t) => list.some((c) => c.type === t));
     let f = filter && types.includes(filter) ? filter : 'all';
     const chips = h(`<div class="chips"></div>`);
     const box = h(`<div></div>`);
@@ -454,25 +689,26 @@
   }
 
   function caseSort(a, b) {
-    const o = { J: 0, S: 1, A: 2, O: 3 };
+    const o = { J: 0, S: 1, W: 2, A: 3, O: 4 };
     return (o[a.type] - o[b.type]) || String(b.date || '').localeCompare(String(a.date || ''), 'zh-Hant');
   }
 
   function panelHist(panel, no) {
     const vs = versionsOf(no);
     if (vs.length === 1) {
-      panel.append(h(`<p class="muted">${label(no)}自民國 73 年 7 月 30 日制定公布以來未曾修正。</p>`));
+      panel.append(h(`<p class="muted">${label(no)}自${esc(APP.enact)}以來未曾修正。</p>`));
       return;
     }
     const tl = h(`<ul class="timeline"></ul>`);
     vs.forEach((v, i) => {
-      tl.append(h(`<li><span class="tl-date">${rocDate(v.date)}</span><span class="tl-type badge ${v.kind === '增訂' ? 'b-new' : v.kind === '制定' ? '' : 'b-amend'}">${v.kind}</span><span>${i === vs.length - 1 ? '（現行）' : ''}</span></li>`));
+      tl.append(h(`<li><span class="tl-date">${rocDate(v.date)}</span><span class="tl-type badge ${v.kind === '增訂' ? 'b-new' : v.kind === '制定' ? '' : 'b-amend'}">${v.kind}</span><span>${v.oldNos ? `（${oldLabel(v.oldNos)}）` : ''}${i === vs.length - 1 ? '（現行）' : ''}</span></li>`));
     });
     panel.append(h(`<h4>條文沿革</h4>`), tl);
 
     const ctrl = h(`<div class="cmp-ctrl" style="margin-top:14px"><b>新舊條文對照</b>
       <select data-k="b"></select><span>對照</span><select data-k="a"></select></div>`);
-    const opt = (sel, idx) => vs.map((v, i) => `<option value="${i}" ${i === idx ? 'selected' : ''}>${rocDate(v.date)} ${v.kind}${i === vs.length - 1 ? '（現行）' : ''}</option>`).join('');
+    const vname = (v, i) => `${rocDate(v.date)} ${v.kind}${v.oldNos ? `（${oldLabel(v.oldNos)}）` : ''}${i === vs.length - 1 ? '（現行）' : ''}`;
+    const opt = (sel, idx) => vs.map((v, i) => `<option value="${i}" ${i === idx ? 'selected' : ''}>${vname(v, i)}</option>`).join('');
     const sb = ctrl.querySelector('[data-k=b]'), sa = ctrl.querySelector('[data-k=a]');
     sb.innerHTML = opt(sb, vs.length - 1);
     sa.innerHTML = opt(sa, vs.length - 2);
@@ -480,7 +716,7 @@
     const draw = () => {
       const nb = vs[+sb.value], na = vs[+sa.value];
       out.innerHTML = '';
-      out.append(compareTable(na.lines, nb.lines, `${rocDate(nb.date)} ${nb.kind}`, `${rocDate(na.date)} ${na.kind}`));
+      out.append(compareTable(na.lines, nb.lines, vname(nb, +sb.value), vname(na, +sa.value)));
     };
     sb.onchange = sa.onchange = draw;
     panel.append(ctrl, h(`<div class="legend"><ins class="d">新增文字</ins>　<del class="d">刪除文字</del>　左欄為較新版本（修正條文），右欄為比較版本（原條文）</div>`), out);
@@ -918,9 +1154,18 @@
 
     function save(no, list) { Store.set('doodle:' + no, list); updateTocMarks(); }
 
+    // 塗鴉模式下，手指（或 Pencil 輕點）仍可點選註記、引用條文
+    function tapThrough(cv, x, y) {
+      cv.style.pointerEvents = 'none';
+      const el = document.elementFromPoint(x, y);
+      cv.style.pointerEvents = '';
+      const t = el && el.closest('.ann-note, .ann-mark, .ann, .annu[data-ann], .xref, .rel, [data-act=close-peek]');
+      if (t) { t.click(); return true; }
+      return false;
+    }
     function bindCanvas(cv, body) {
       const no = body.dataset.no;
-      let cur = null;
+      let cur = null, other = null;
       const accept = (e) => on && (S.pencilOnly ? e.pointerType === 'pen' || e.pointerType === 'mouse' : true);
       const local = (e) => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top, e.pressure || 0.5]; };
       const eraseAt = (x, y) => {
@@ -935,12 +1180,17 @@
         draw(body);
       };
       cv.addEventListener('pointerdown', (e) => {
-        if (!accept(e)) return;
+        if (!accept(e)) { other = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() }; return; }
         e.preventDefault();
         cv.setPointerCapture(e.pointerId);
         const [x, y, p] = local(e);
         if (tool.eraser) { cur = { erase: true }; eraseAt(x, y); return; }
-        cur = { pts: [x, y, p], cx: [e.clientX], cy: [e.clientY] };
+        cur = { pts: [x, y, p], cx: [e.clientX], cy: [e.clientY], t0: performance.now() };
+      });
+      cv.addEventListener('pointerup', (e) => {
+        if (!other || other.id !== e.pointerId) return;
+        const o = other; other = null;
+        if (Math.hypot(e.clientX - o.x, e.clientY - o.y) < 10 && performance.now() - o.t < 600) tapThrough(cv, e.clientX, e.clientY);
       });
       cv.addEventListener('pointermove', (e) => {
         if (!cur) return;
@@ -962,6 +1212,8 @@
         if (c.erase) return;
         // anchor to the character nearest the stroke's centre
         const minX = Math.min(...c.cx), maxX = Math.max(...c.cx), minY = Math.min(...c.cy), maxY = Math.max(...c.cy);
+        // a quick Pencil tap on a note toggles it instead of leaving a dot
+        if (maxX - minX < 6 && maxY - minY < 6 && performance.now() - c.t0 < 350 && tapThrough(cv, (minX + maxX) / 2, (minY + maxY) / 2)) { draw(body); return; }
         cv.style.pointerEvents = 'none';
         const an = anchorAt(body, (minX + maxX) / 2, (minY + maxY) / 2);
         cv.style.pointerEvents = '';
@@ -1034,7 +1286,8 @@
     }
     const onResize = debounce(() => { for (const b of bodies) if (b.isConnected && b.querySelector('canvas.doodle')) draw(b); }, 150);
     window.addEventListener('resize', onResize);
-    return { observe, unobserve, setMode, toggle: () => setMode(!on), refreshVisible, get on() { return on; }, redraw: onResize };
+    const redrawBody = (body) => { if (body && body.querySelector('canvas.doodle')) draw(body); };
+    return { observe, unobserve, setMode, toggle: () => setMode(!on), refreshVisible, get on() { return on; }, redraw: onResize, redrawBody };
   })();
 
   /* ------------------------------------------------------------------ *
@@ -1124,6 +1377,7 @@
     if (v === 'amend') renderAmend();
     if (v === 'cases') renderCasesView();
     if (v === 'mine') renderMine();
+    if (v === 'law') AnnLayout.queue();
     if (v !== 'law' && v !== 'search') $('#main').scrollTop = 0;
     if (push && v !== 'search') history.replaceState(null, '', v === 'law' ? location.pathname + location.search : '#' + v);
     document.body.classList.remove('toc-open');
@@ -1132,8 +1386,9 @@
   function renderLaw() {
     const v = $('#view-law');
     v.innerHTML = '';
-    v.append(h(`<div class="law-head"><h1>勞動基準法</h1>
-      <div class="meta">現行法　民國 ${D.meta.modifiedRoc.replace(/\./g, ' 年 ').replace(/ 年 (\d+)$/, ' 月 $1 日')}修正公布｜全 ${ARTS.length} 條｜資料來源：<a href="${D.meta.source}" target="_blank" rel="noopener">全國法規資料庫</a></div></div>`));
+    v.append(h(`<div class="law-head"><h1>${esc(D.meta.name)}</h1>
+      <div class="meta">現行法　民國 ${D.meta.modifiedRoc.replace(/\./g, ' 年 ').replace(/ 年 (\d+)$/, ' 月 $1 日')}修正公布｜全 ${ARTS.length} 條｜資料來源：<a href="${D.meta.source}" target="_blank" rel="noopener">全國法規資料庫</a></div>
+      ${APP.intro ? `<div class="meta intro">${APP.intro}</div>` : ''}</div>`));
     let ch = null;
     const frag = document.createDocumentFragment();
     ARTS.forEach((a) => {
@@ -1141,7 +1396,7 @@
       frag.append(renderArticle(a));
     });
     v.append(frag);
-    v.append(h(`<div class="disclaimer">條文、歷次修正條文與大法官解釋取自法務部全國法規資料庫；判決要旨係摘錄自司法院裁判書系統中法院引用之文字，函釋則為法院判決中引用之主管機關函號與內容摘錄，僅供學習參考，實際引用請以原文為準。個人註記僅儲存在本裝置，請定期於「設定」匯出備份。</div>`));
+    v.append(h(`<div class="disclaimer">${esc(APP.disclaimer)}</div>`));
     observeArticles();
   }
 
@@ -1206,17 +1461,21 @@
     v.innerHTML = `<div class="page-h"><h2>修法沿革與新舊條文對照</h2><span class="muted">共 ${D.amendments.length} 次公布，點選展開對照表</span></div>
       <div class="legend"><ins class="d">新增文字</ins>　<del class="d">刪除文字</del>　左欄為修正後條文，右欄為修正前條文</div>`;
     [...D.amendments].reverse().forEach((am, idx) => {
-      const arts = am.changes.map((c) => `${shortLabel(c.no)}${c.type === 'add' ? '（增）' : c.type === 'del' ? '（刪）' : ''}`).join('、');
-      const d = h(`<details class="amend" ${idx === 0 ? 'open' : ''}><summary><span class="a-date">${am.roc}</span><span class="a-arts">${am.changes.length ? '第 ' + arts + ' 條' : '制定公布全文 86 條'}</span></summary><div class="a-body"><div class="a-desc">${esc(am.desc)}</div></div></details>`);
+      const arts = am.changes.filter((c) => c.no).map((c) => `${shortLabel(c.no)}${c.type === 'add' ? '（增）' : c.type === 'del' ? '（刪）' : ''}`).join('、');
+      const d = h(`<details class="amend" ${idx === 0 ? 'open' : ''}><summary><span class="a-date">${am.roc}</span><span class="a-arts">${esc(am.title || (am.changes.length ? '第 ' + arts + ' 條' : '制定公布'))}</span></summary><div class="a-body"><div class="a-desc">${esc(am.desc)}</div></div></details>`);
       const body = d.querySelector('.a-body');
       const fill = () => {
         if (body.dataset.done) return;
         body.dataset.done = 1;
+        if (am.note) body.append(h(`<p class="muted">${esc(am.note)}</p>`));
         am.changes.forEach((c) => {
-          const t = h(`<div class="a-art"><span>${label(c.no)}</span><span class="badge ${c.type === 'add' ? 'b-new' : 'b-amend'}">${c.type === 'add' ? '增訂' : c.type === 'del' ? '刪除' : '修正'}</span><button class="btn small" data-go="${c.no}">看現行條文</button></div>`);
-          body.append(t, compareTable(c.old, c.new, `修正條文（${am.roc}）`, c.type === 'add' ? '原條文（無）' : '修正前條文'));
+          const kind = c.type === 'add' ? '增訂' : c.type === 'del' ? '刪除' : '修正';
+          const head = c.no ? `${label(c.no)}${c.oldNos ? `<small class="muted">（${oldLabel(c.oldNos)}）</small>` : ''}` : `${oldLabel(c.oldNos || [])}`;
+          const t = h(`<div class="a-art"><span>${head}</span><span class="badge ${c.type === 'add' ? 'b-new' : 'b-amend'}">${kind}</span>${c.no ? `<button class="btn small" data-go="${c.no}">看現行條文</button>` : ''}</div>`);
+          const oldT = c.type === 'add' ? '原條文（無）' : c.oldNos ? `修正前條文（${oldLabel(c.oldNos)}）` : '修正前條文';
+          body.append(t, compareTable(c.old, c.new, c.type === 'del' ? '（刪除）' : `修正條文（${am.roc}）`, oldT));
         });
-        if (!am.changes.length) body.append(h(`<p class="muted">民國 73 年 7 月 30 日制定公布全文 86 條，同年 8 月 1 日施行。</p>`));
+        if (!am.changes.length) body.append(h(`<p class="muted">${esc(am.desc)}</p>`));
       };
       if (idx === 0) fill();
       d.addEventListener('toggle', () => d.open && fill());
@@ -1229,9 +1488,9 @@
   function renderCasesView() {
     const v = $('#view-cases');
     const list = allCases();
-    v.innerHTML = `<div class="page-h"><h2>判解函釋</h2><span class="muted">大法官解釋 ${list.filter((c) => c.type === 'J').length}・判決 ${list.filter((c) => c.type === 'S').length}・函釋 ${list.filter((c) => c.type === 'A').length}${list.some((c) => c.type === 'O') ? '・其他 ' + list.filter((c) => c.type === 'O').length : ''}</span>
+    v.innerHTML = `<div class="page-h"><h2>判解函釋</h2><span class="muted">${TYPES.filter((t) => list.some((c) => c.type === t)).map((t) => `${TYPE_NAME[t]} ${list.filter((c) => c.type === t).length}`).join('・')}</span>
       <button class="btn primary" style="margin-left:auto" data-act="add">＋ 新增</button></div>
-      <div class="chips">${[['all', '全部'], ['J', '大法官解釋'], ['S', '判決'], ['A', '函釋'], ['O', '其他'], ['u', '我新增的']].map(([k, t]) => `<button class="chip ${k === cvFilter ? 'on' : ''}" data-f="${k}">${t}</button>`).join('')}</div>
+      <div class="chips">${[['all', '全部'], ...TYPES.filter((t) => t === 'O' || list.some((c) => c.type === t)).map((t) => [t, TYPE_NAME[t]]), ['u', '我新增的']].map(([k, t]) => `<button class="chip ${k === cvFilter ? 'on' : ''}" data-f="${k}">${t}</button>`).join('')}</div>
       <div class="field"><input type="search" placeholder="在判解函釋中搜尋（字號、要旨、條號）" value="${esc(cvQuery)}"></div>
       <div class="cv-list"></div>`;
     const box = $('.cv-list', v);
@@ -1347,7 +1606,7 @@
     const list = Store.get('ucases', []);
     const c = id ? list.find((x) => x.id === id) : { type: 'S', title: '', date: '', topic: '', summary: '', arts: no ? [no] : [], url: '' };
     const body = h(`<div>
-      <div class="field"><label>類型</label><select name="type">${['S', 'A', 'J', 'O'].map((t) => `<option value="${t}" ${c.type === t ? 'selected' : ''}>${TYPE_NAME[t]}</option>`).join('')}</select></div>
+      <div class="field"><label>類型</label><select name="type">${['S', 'W', 'A', 'J', 'O'].map((t) => `<option value="${t}" ${c.type === t ? 'selected' : ''}>${TYPE_NAME[t]}</option>`).join('')}</select></div>
       <div class="field"><label>字號 / 名稱</label><input name="title" placeholder="例：最高法院 110 年度台上字第 123 號判決、勞動部 ○○ 函" value="${esc(c.title)}"></div>
       <div class="field"><label>日期</label><input name="date" placeholder="例：民國 110 年 5 月 12 日" value="${esc(c.date)}"></div>
       <div class="field"><label>爭點 / 主題</label><input name="topic" value="${esc(c.topic)}"></div>
@@ -1396,7 +1655,10 @@
       <div class="set-row"><span class="lbl">項次標示</span>${seg('pno', [['roman', 'Ⅰ Ⅱ'], ['circle', '① ②'], ['none', '不標示']])}</div>
       <div class="set-row"><span class="lbl">顯示條文上的塗鴉</span>${seg('showDoodle', [[true, '顯示'], [false, '隱藏']])}</div>
       <div class="set-row"><span class="lbl">手寫與塗鴉<small>「僅 Pencil」時手指捲動、Apple Pencil 書寫</small></span>${seg('pencilOnly', [[true, '僅 Pencil'], [false, '手指也可寫']])}</div>
-      <div class="set-row"><span class="lbl">顯示條文上的小字註記</span>${seg('showAnn', [[true, '顯示'], [false, '隱藏']])}</div>
+      <div class="set-row"><span class="lbl">條文上的小字註記<small>隱藏時只留「註」字標記，點一下可暫時打開</small></span>${seg('showAnn', [[true, '顯示'], [false, '全部隱藏']])}</div>
+      <div class="set-row"><span class="lbl">點一下註記即隱藏／顯示<small>長按註記可編輯</small></span>${seg('annTap', [['both', 'Pencil 與手指'], ['pen', '僅 Pencil'], ['touch', '僅手指']])}</div>
+      <div class="set-row"><span class="lbl">點選條文中引用的條號<small>小字顯示該條（含其他法律，如工會法）</small></span>${seg('refTap', [['peek', '顯示小字'], ['jump', '跳至該條']])}</div>
+      <div class="set-row"><span class="lbl">引用條文小字</span>${seg('refAll', [[false, '點選才展開'], [true, '全部展開']])}</div>
       <div class="set-row"><span class="lbl">條文下顯示我的註記</span>${seg('showNotes', [[true, '顯示'], [false, '隱藏']])}</div>
       <div class="set-row"><span class="lbl">條文下顯示手寫筆記</span>${seg('showInk', [[true, '顯示'], [false, '隱藏']])}</div>
       <div class="set-row"><span class="lbl">條文內引用條號可點選</span>${seg('xref', [[true, '開'], [false, '關']])}</div>
@@ -1406,7 +1668,8 @@
       <input type="file" accept="application/json,.json" hidden>
       <h4 style="margin:18px 0 6px">安裝到主畫面</h4>
       <p class="muted" style="margin-top:0">在 iPad Safari 點「分享」→「加入主畫面」，即可像 App 一樣全螢幕開啟並離線使用。</p>
-      <p class="muted">資料版本：現行條文 ${D.meta.modifiedRoc}・修正 ${D.amendments.length} 次・大法官解釋 ${D.interps.length} 則・判決 ${BUILTIN_CASES.filter((c) => c.type === 'S').length} 則・函釋 ${BUILTIN_CASES.filter((c) => c.type === 'A').length} 則</p>
+      <p class="muted">資料版本：現行條文 ${D.meta.modifiedRoc}・公布 ${D.amendments.length} 次・${TYPES.filter((t) => BUILTIN_CASES.some((c) => c.type === t)).map((t) => `${TYPE_NAME[t]} ${BUILTIN_CASES.filter((c) => c.type === t).length} 則`).join('・')}${Object.keys(REF_LAWS).length ? `・附錄相關法律：${Object.values(REF_LAWS).map((l) => `${l.name} ${Object.keys(l.arts).length} 條`).join('、')}` : ''}</p>
+      ${APP.others.length && !/claude|anthropic|usercontent/.test(location.hostname) ? `<h4 style="margin:18px 0 6px">其他法典</h4><div class="row">${APP.others.map((o) => `<a class="btn" href="${esc(o.href)}">${esc(o.name)}</a>`).join('')}</div>` : ''}
     </div>`);
     body.addEventListener('click', (e) => {
       const b = e.target.closest('button');
@@ -1416,6 +1679,7 @@
         const k = sg.dataset.k; let v = b.dataset.v;
         if (v === 'true') v = true; else if (v === 'false') v = false;
         S[k] = v; saveSettings();
+        if (k === 'showAnn') { peek.clear(); syncAnnBtn(); }
         if (k === 'pencilOnly') document.body.classList.toggle('doodle-finger', Doodle.on && !S.pencilOnly);
         $$('button', sg).forEach((x) => x.classList.toggle('on', x === b));
         rerenderAll();
@@ -1446,10 +1710,10 @@
   function exportData() {
     const data = {};
     Store.keys().forEach((k) => { data[k] = Store.get(k); });
-    const payload = { app: 'lsa-codex', version: 1, exported: new Date().toISOString(), data };
+    const payload = { app: APP.id, version: 1, exported: new Date().toISOString(), data };
     const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
     const d = new Date();
-    const name = `勞基法法典備份-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.json`;
+    const name = `${APP.short}備份-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.json`;
     const file = typeof File === 'function' ? new File([blob], name, { type: 'application/json' }) : null;
     const sandboxed = /claude|anthropic|usercontent/.test(location.hostname);
     if (sandboxed) showExportText(JSON.stringify(payload), name);
@@ -1470,7 +1734,7 @@
     r.onload = () => {
       try {
         const p = JSON.parse(r.result);
-        if (p.app !== 'lsa-codex' || !p.data) throw new Error('不是本 App 的備份檔');
+        if (p.app !== APP.id || !p.data) throw new Error(p.app && p.data ? '這是其他法典的備份檔' : '不是本 App 的備份檔');
         const n = Object.keys(p.data).length;
         ask(`備份檔含 ${n} 筆資料（${(p.exported || '').slice(0, 10)}）。要如何匯入？`, '完全取代目前資料', '合併（同一條以備份為準）').then(async (r) => {
           if (r === null) return;
@@ -1524,8 +1788,41 @@
   /* ------------------------------------------------------------------ *
    * global events
    * ------------------------------------------------------------------ */
+  function syncAnnBtn() {
+    const b = $('#btnAnn');
+    if (!b) return;
+    b.classList.toggle('off', !S.showAnn);
+    b.title = S.showAnn ? '隱藏全部小字註記' : '顯示全部小字註記';
+  }
+  // 點一下註記：Pencil／手指皆可（依設定）；長按：編輯
+  const TAP = { type: 'mouse', x: 0, y: 0, lp: 0, fired: false };
+  const tapOK = () => S.annTap === 'both' || (S.annTap === 'pen' ? TAP.type === 'pen' : TAP.type !== 'pen');
+
   function bind() {
     $('#btnDoodle').onclick = () => Doodle.toggle();
+    const ba = $('#btnAnn');
+    if (ba) ba.onclick = () => {
+      S.showAnn = !S.showAnn; peek.clear(); saveSettings(); syncAnnBtn();
+      $$('#view-law .art').forEach((el) => { if (annList(el.dataset.no).length) refreshArticle(el.dataset.no); });
+      toast(S.showAnn ? '已顯示全部小字註記' : '已隱藏全部小字註記（點「註」字可暫時打開）');
+    };
+    syncAnnBtn();
+    const main = $('#main');
+    const noteSel = '.ann-note, .ann-mark, .ann';
+    main.addEventListener('pointerdown', (e) => {
+      TAP.type = e.pointerType || 'mouse'; TAP.x = e.clientX; TAP.y = e.clientY; TAP.fired = false;
+      clearTimeout(TAP.lp);
+      const n = e.target.closest && e.target.closest(noteSel);
+      if (n) TAP.lp = setTimeout(() => { TAP.fired = true; editAnn(n.closest('.art').dataset.no, n.dataset.ann); }, 550);
+    }, true);
+    main.addEventListener('pointermove', (e) => { if (Math.hypot(e.clientX - TAP.x, e.clientY - TAP.y) > 10) clearTimeout(TAP.lp); }, true);
+    main.addEventListener('pointerup', () => clearTimeout(TAP.lp), true);
+    main.addEventListener('pointercancel', () => clearTimeout(TAP.lp), true);
+    main.addEventListener('contextmenu', (e) => { if (e.target.closest(noteSel)) e.preventDefault(); });
+    main.addEventListener('dblclick', (e) => {
+      const n = e.target.closest(noteSel);
+      if (n && TAP.type === 'mouse') { e.preventDefault(); editAnn(n.closest('.art').dataset.no, n.dataset.ann); }
+    });
     $('#btnToc').onclick = () => {
       if (window.innerWidth >= 1024) document.body.classList.toggle('toc-hidden');
       else document.body.classList.toggle('toc-open');
@@ -1575,8 +1872,18 @@
         if (act === 'detail') { openDetail.has(no) ? setDetail(no, null) : setDetail(no, 'note'); return; }
         if (act === 'open-note') { setDetail(no, 'note'); return; }
         if (act === 'open-ink') { setDetail(no, 'ink'); return; }
-        const annEl = t.closest('.ann');
-        if (annEl) { editAnn(no, +annEl.dataset.ann); return; }
+        if (act === 'anns') { setAnnsAll(no, annList(no).some((a) => annVisible(no, a))); return; }
+        if (act === 'close-peek') { togglePeek(no, t.closest('.ref-peek').dataset.key); return; }
+        const refEl = t.closest('[data-ref]');
+        if (refEl && refEl.closest('.art-body')) { togglePeek(no, refEl.dataset.ref); return; }
+        const annEl = t.closest('.ann-note, .ann-mark, .ann, .annu[data-ann]');
+        if (annEl && annEl.closest('.art-body')) {
+          if (TAP.fired) { TAP.fired = false; return; }
+          if (window.getSelection().toString()) return;
+          if (tapOK()) toggleAnn(no, annEl.dataset.ann);
+          else if (!annEl.classList.contains('annu')) toast(S.annTap === 'pen' ? '已設定僅以 Apple Pencil 點按切換註記' : '已設定僅以手指點按切換註記');
+          return;
+        }
         const badge = t.closest('.badge[data-tab]');
         if (badge) { setDetail(no, badge.dataset.tab, badge.dataset.f); return; }
         const tab = t.closest('.tab');
@@ -1626,6 +1933,8 @@
     renderToc();
     renderLaw();
     bind();
+    if (window.ResizeObserver) { let w = 0; new ResizeObserver((es) => { const nw = Math.round(es[0].contentRect.width); if (nw !== w) { w = nw; AnnLayout.queue(); } }).observe($('#view-law')); }
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => AnnLayout.queue());
     if (location.hash) route();
     else {
       const last = Store.get('last');
@@ -1642,6 +1951,6 @@
   }
 
   // expose for tests
-  window.__LSA = { diffChars, cn2n, parseArtNo, Store, xrefs };
+  window.__LSA = { diffChars, cn2n, parseArtNo, Store, xrefs, APP, AnnLayout };
   boot();
 })();

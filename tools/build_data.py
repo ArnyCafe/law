@@ -105,6 +105,13 @@ data = {
         'modified': meta['meta']['LawModifiedDate'], 'modifiedRoc': roc(meta['meta']['LawModifiedDate']),
         'source': 'https://law.moj.gov.tw/LawClass/LawAll.aspx?pcode=N0030001',
     },
+    'app': {
+        'id': 'lsa-codex', 'db': 'lsa-codex', 'short': '勞基法法典', 'annPos': 'i', 'refTap': 'jump',
+        'enact': '民國 73 年 7 月 30 日制定公布',
+        'flags': {'49': {'badge': '第1項經釋字807失效', 'cls': 'b-warn',
+                         'note': '司法院釋字第807號解釋（110.08.20）：本條第1項規定違反憲法第7條保障性別平等之意旨，應自解釋公布之日起失其效力。'}},
+        'others': [{'name': '團體協約法典', 'href': 'cba/'}],
+    },
     'chapters': chapters,
     'articles': articles,
     'amendments': amendments,

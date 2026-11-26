@@ -1,0 +1,67 @@
+<title>團體協約法典</title>
+<meta name="description" content="團體協約法條文、小字註記、Apple Pencil 塗鴉與手寫筆記、判決、裁決、函釋、工會法等相關法條與新舊條文對照（iPad 最佳化，可離線使用）">
+<link rel="stylesheet" href="app.css">
+<header class="topbar">
+  <button class="icon-btn" id="btnToc" aria-label="目錄" title="目錄">
+    <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+  </button>
+  <div class="brand">
+    <span class="brand-title">團體協約法</span>
+    <span class="brand-sub" id="brandSub"></span>
+  </div>
+  <div class="search-wrap">
+    <svg viewBox="0 0 24 24" class="search-ico"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg>
+    <input id="search" type="search" placeholder="搜尋條文、註記、判決、裁決、函釋… 或輸入條號如 6、19" autocomplete="off" enterkeyhint="search">
+  </div>
+  <nav class="views" role="tablist">
+    <button class="view-btn active" data-view="law">條文</button>
+    <button class="view-btn" data-view="amend">修法沿革</button>
+    <button class="view-btn" data-view="cases">判解函釋</button>
+    <button class="view-btn" data-view="mine">我的筆記</button>
+  </nav>
+  <button class="icon-btn" id="btnAnn" aria-label="顯示／隱藏小字註記" title="隱藏全部小字註記">註</button>
+  <button class="icon-btn" id="btnDoodle" aria-label="塗鴉" title="Apple Pencil 塗鴉">
+    <svg viewBox="0 0 24 24"><path d="M3 21c2-1 3-3 5-3s2 2 4 2 3-2 5-2"/><path d="M14.5 4.5l4 4L10 17H6v-4z"/></svg>
+  </button>
+  <button class="icon-btn" id="btnSettings" aria-label="設定" title="設定與備份">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>
+  </button>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="side-head">
+      <span>目錄</span>
+      <button class="text-btn" id="btnCollapseAll">全部收合</button>
+    </div>
+    <div id="toc" class="toc"></div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <main id="main" class="main">
+    <section id="view-law" class="view active"></section>
+    <section id="view-amend" class="view"></section>
+    <section id="view-cases" class="view"></section>
+    <section id="view-mine" class="view"></section>
+    <section id="view-search" class="view"></section>
+  </main>
+</div>
+
+<!-- floating highlight toolbar -->
+<div id="hlbar" class="hlbar" hidden>
+  <button data-c="y" class="sw sw-y" aria-label="黃色螢光"></button>
+  <button data-c="g" class="sw sw-g" aria-label="綠色螢光"></button>
+  <button data-c="b" class="sw sw-b" aria-label="藍色螢光"></button>
+  <button data-c="p" class="sw sw-p" aria-label="粉紅螢光"></button>
+  <button data-c="u" class="sw sw-u" aria-label="紅色底線">U</button>
+  <button data-c="x" class="sw sw-x" aria-label="清除標記">✕</button>
+  <span class="sep"></span>
+  <button data-act="note" class="hl-note">加註</button>
+</div>
+
+<dialog id="dlg" class="dlg"></dialog>
+<dialog id="ask" class="dlg" style="width:min(440px,92vw)"></dialog>
+<div id="toast" class="toast" hidden></div>
+
+<script src="cba-data.js"></script>
+<script src="app.js"></script>
