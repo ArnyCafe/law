@@ -107,7 +107,7 @@
   /* ------------------------------------------------------------------ *
    * settings
    * ------------------------------------------------------------------ */
-  const DEFAULTS = { showAnn: true, fs: 19, font: 'sans', theme: 'auto', pno: 'roman', pencilOnly: true, showNotes: true, showInk: true, xref: true };
+  const DEFAULTS = { showDoodle: true, showAnn: true, fs: 19, font: 'sans', theme: 'auto', pno: 'roman', pencilOnly: true, showNotes: true, showInk: true, xref: true };
   let S = {};
   function loadSettings() { S = Object.assign({}, DEFAULTS, Store.get('settings', {})); applySettings(); }
   function saveSettings() { Store.set('settings', S); applySettings(); }
@@ -217,7 +217,7 @@
   const openDetail = new Map(); // no -> tab
 
   function hasMine(no) {
-    return !!(Store.get('note:' + no) || Store.get('hl:' + no) || Store.get('ink:' + no) || Store.get('ann:' + no));
+    return !!(Store.get('note:' + no) || Store.get('hl:' + no) || Store.get('ink:' + no) || Store.get('ann:' + no) || Store.get('doodle:' + no));
   }
 
   // inline annotation on the article text: {r:[{l,s,e}], t: text, c: 'r'|'n'|'g'|'v'}
@@ -297,6 +297,7 @@
       el.querySelector('.art-body').append(h(`<div class="void-note">司法院釋字第807號解釋（110.08.20）：本條第1項規定違反憲法第7條保障性別平等之意旨，應自解釋公布之日起失其效力。</div>`));
     }
     appendPreviews(el, a.no);
+    Doodle.observe(el.querySelector('.art-body'));
     if (openDetail.has(a.no)) el.append(renderDetail(a.no, openDetail.get(a.no)));
     return el;
   }
@@ -325,6 +326,7 @@
     const main = $('#main');
     const top = old.getBoundingClientRect().top;
     InkPad.disposeIn(old);
+    Doodle.unobserve(old.querySelector('.art-body'));
     const nu = renderArticle(a);
     old.replaceWith(nu);
     if (keepScroll) main.scrollTop += nu.getBoundingClientRect().top - top;
@@ -390,6 +392,12 @@
       const b = h(`<button class="btn small">清除本條全部螢光（${hl.length}）</button>`);
       b.onclick = async () => { if (await ask('確定清除本條所有螢光標記？', '清除')) { Store.del('hl:' + no); refreshArticle(no); } };
       row.append(b);
+    }
+    const dd = Store.get('doodle:' + no, []);
+    if (dd.length) {
+      const b2 = h(`<button class="btn small">清除本條塗鴉（${dd.length} 筆）</button>`);
+      b2.onclick = async () => { if (await ask('確定清除本條所有塗鴉？', '清除')) { Store.del('doodle:' + no); refreshArticle(no); updateTocMarks(); } };
+      row.append(b2);
     }
     panel.append(h(`<p class="muted">提示：在條文上長按並選取文字，可加上螢光標記，或按「加註」把小字註記直接寫在該段條文後面（紅、深藍、綠、紫）。點條文上的註記可編輯或刪除。</p>`));
     setTimeout(() => { if (panel.isConnected && !matchMedia('(pointer:coarse)').matches) ta.focus(); }, 50);
@@ -767,6 +775,269 @@
   })();
 
   /* ------------------------------------------------------------------ *
+   * doodle: Apple Pencil drawing directly on the article text.
+   * Each stroke is anchored to a character (line index + offset) and stored
+   * in em units relative to that character, so it follows the text when the
+   * font size or the page width changes.
+   * stroke: {l, o, p:[dx,dy,pressure,...] (em), c, w (em), a (alpha)}
+   * ------------------------------------------------------------------ */
+  const Doodle = (() => {
+    const COLORS = [['#c62828', '紅'], ['#1a3a8f', '深藍'], ['#1f2328', '黑'], ['#1b7a43', '綠'], ['#ffd400', '螢光', true]];
+    let on = false;
+    let tool = { c: COLORS[0][0], w: 0.11, hl: false, eraser: false };
+    const undo = [];
+    let io = null;
+    const bodies = new Set();
+    const rendered = new WeakMap(); // canvas -> [{i, pts:[x,y,...] in canvas px}]
+
+    function ensureIO() {
+      if (io) return io;
+      io = new IntersectionObserver((ents) => ents.forEach((e) => (e.isIntersecting ? attach(e.target) : detach(e.target))), { root: $('#main'), rootMargin: '800px 0px' });
+      return io;
+    }
+    function observe(body) { bodies.add(body); ensureIO().observe(body); }
+    function unobserve(body) { if (io) io.unobserve(body); bodies.delete(body); }
+    const strokes = (no) => Store.get('doodle:' + no, []);
+    const need = (no) => on || (S.showDoodle && strokes(no).length > 0);
+
+    function textNodes(lt) {
+      const out = [];
+      const w = document.createTreeWalker(lt, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = w.nextNode())) out.push(n);
+      return out;
+    }
+    function charRect(body, l, o) {
+      const ln = body.querySelector(`.ln[data-li="${l}"] .lt`);
+      if (!ln) return null;
+      let acc = 0;
+      const nodes = textNodes(ln);
+      for (const n of nodes) {
+        if (o < acc + n.length) {
+          const r = document.createRange();
+          r.setStart(n, o - acc); r.setEnd(n, o - acc + 1);
+          const rs = r.getClientRects();
+          return rs[0] || r.getBoundingClientRect();
+        }
+        acc += n.length;
+      }
+      return ln.getBoundingClientRect();
+    }
+    function anchorAt(body, x, y) {
+      let best = null;
+      $$('.ln', body).forEach((ln) => {
+        const lt = ln.querySelector('.lt');
+        let acc = 0;
+        textNodes(lt).forEach((n) => {
+          const r = document.createRange();
+          for (let i = 0; i < n.length; i++) {
+            r.setStart(n, i); r.setEnd(n, i + 1);
+            const rc = r.getClientRects()[0];
+            if (!rc) continue;
+            const dy = y < rc.top ? rc.top - y : y > rc.bottom ? y - rc.bottom : 0;
+            const dx = x < rc.left ? rc.left - x : x > rc.right ? x - rc.right : 0;
+            const d = dy * 4 + dx;
+            if (!best || d < best.d) best = { d, l: +ln.dataset.li, o: acc + i, rc };
+          }
+          acc += n.length;
+        });
+      });
+      return best;
+    }
+    const fsOf = (body) => parseFloat(getComputedStyle(body).fontSize) || 19;
+
+    function strokeStyle(ctx, st, fs) {
+      ctx.strokeStyle = st.c; ctx.fillStyle = st.c;
+      ctx.globalAlpha = st.a || 1;
+      ctx.lineCap = st.a ? 'butt' : 'round'; ctx.lineJoin = 'round';
+      ctx.lineWidth = st.w * fs;
+    }
+    function drawPts(ctx, st, pts, fs) {
+      ctx.save();
+      strokeStyle(ctx, st, fs);
+      if (pts.length <= 3) { ctx.beginPath(); ctx.arc(pts[0], pts[1], (st.w * fs) / 2, 0, Math.PI * 2); ctx.fill(); ctx.restore(); return; }
+      if (st.a) {
+        ctx.beginPath(); ctx.moveTo(pts[0], pts[1]);
+        for (let i = 3; i < pts.length; i += 3) ctx.lineTo(pts[i], pts[i + 1]);
+        ctx.stroke();
+      } else {
+        for (let i = 3; i < pts.length; i += 3) {
+          const pr = (pts[i + 2] + pts[i - 1]) / 2 || 0.5;
+          ctx.lineWidth = Math.max(0.7, st.w * fs * (0.5 + pr));
+          ctx.beginPath(); ctx.moveTo(pts[i - 3], pts[i - 2]); ctx.lineTo(pts[i], pts[i + 1]); ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    function draw(body) {
+      const cv = body.querySelector('canvas.doodle');
+      if (!cv) return;
+      const dpr = window.devicePixelRatio || 1;
+      const cr = cv.getBoundingClientRect();
+      cv.width = Math.round(cr.width * dpr); cv.height = Math.round(cr.height * dpr);
+      const ctx = cv.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cr.width, cr.height);
+      const fs = fsOf(body);
+      const out = [];
+      if (S.showDoodle || on) {
+        strokes(body.dataset.no).forEach((st, i) => {
+          const rc = charRect(body, st.l, st.o);
+          if (!rc) return;
+          const ox = rc.left - cr.left, oy = rc.top - cr.top;
+          const pts = [];
+          for (let k = 0; k < st.p.length; k += 3) pts.push(ox + st.p[k] * fs, oy + st.p[k + 1] * fs, st.p[k + 2]);
+          drawPts(ctx, st, pts, fs);
+          out.push({ i, pts, w: st.w * fs });
+        });
+      }
+      rendered.set(cv, out);
+    }
+
+    function attach(body) {
+      if (!body.isConnected || !need(body.dataset.no)) { detach(body); return; }
+      let cv = body.querySelector('canvas.doodle');
+      if (!cv) {
+        cv = document.createElement('canvas');
+        cv.className = 'doodle';
+        body.append(cv);
+        bindCanvas(cv, body);
+      }
+      draw(body);
+    }
+    function detach(body) { const cv = body.querySelector('canvas.doodle'); if (cv) cv.remove(); }
+    function refreshVisible() {
+      const mr = $('#main').getBoundingClientRect();
+      for (const b of [...bodies]) {
+        if (!b.isConnected) { unobserve(b); continue; }
+        const r = b.getBoundingClientRect();
+        if (r.bottom > mr.top - 800 && r.top < mr.bottom + 800) attach(b); else detach(b);
+      }
+    }
+
+    function save(no, list) { Store.set('doodle:' + no, list); updateTocMarks(); }
+
+    function bindCanvas(cv, body) {
+      const no = body.dataset.no;
+      let cur = null;
+      const accept = (e) => on && (S.pencilOnly ? e.pointerType === 'pen' || e.pointerType === 'mouse' : true);
+      const local = (e) => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top, e.pressure || 0.5]; };
+      const eraseAt = (x, y) => {
+        const hits = new Set();
+        (rendered.get(cv) || []).forEach((rs) => {
+          for (let k = 0; k < rs.pts.length; k += 3) if (Math.hypot(rs.pts[k] - x, rs.pts[k + 1] - y) < 12 + rs.w) { hits.add(rs.i); break; }
+        });
+        if (!hits.size) return;
+        const list = strokes(no);
+        undo.push({ no, list });
+        save(no, list.filter((_, i) => !hits.has(i)));
+        draw(body);
+      };
+      cv.addEventListener('pointerdown', (e) => {
+        if (!accept(e)) return;
+        e.preventDefault();
+        cv.setPointerCapture(e.pointerId);
+        const [x, y, p] = local(e);
+        if (tool.eraser) { cur = { erase: true }; eraseAt(x, y); return; }
+        cur = { pts: [x, y, p], cx: [e.clientX], cy: [e.clientY] };
+      });
+      cv.addEventListener('pointermove', (e) => {
+        if (!cur) return;
+        e.preventDefault();
+        const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+        const ctx = cv.getContext('2d');
+        const fs = fsOf(body);
+        for (const ev of evs) {
+          const [x, y, p] = local(ev);
+          if (cur.erase) { eraseAt(x, y); continue; }
+          cur.pts.push(x, y, p); cur.cx.push(ev.clientX); cur.cy.push(ev.clientY);
+          if (!tool.hl) drawPts(ctx, { c: tool.c, w: tool.w }, cur.pts.slice(-6), fs);
+        }
+        if (tool.hl && !cur.erase) { draw(body); drawPts(ctx, { c: tool.c, w: 0.9, a: 0.32 }, cur.pts, fs); }
+      });
+      const end = () => {
+        if (!cur) return;
+        const c = cur; cur = null;
+        if (c.erase) return;
+        // anchor to the character nearest the stroke's centre
+        const minX = Math.min(...c.cx), maxX = Math.max(...c.cx), minY = Math.min(...c.cy), maxY = Math.max(...c.cy);
+        cv.style.pointerEvents = 'none';
+        const an = anchorAt(body, (minX + maxX) / 2, (minY + maxY) / 2);
+        cv.style.pointerEvents = '';
+        if (!an) { draw(body); return; }
+        const fs = fsOf(body);
+        const cr = cv.getBoundingClientRect();
+        const ox = an.rc.left - cr.left, oy = an.rc.top - cr.top;
+        const rel = [];
+        for (let k = 0; k < c.pts.length; k += 3) rel.push(+((c.pts[k] - ox) / fs).toFixed(3), +((c.pts[k + 1] - oy) / fs).toFixed(3), +c.pts[k + 2].toFixed(2));
+        const st = tool.hl ? { l: an.l, o: an.o, p: rel, c: tool.c, w: 0.9, a: 0.32 } : { l: an.l, o: an.o, p: rel, c: tool.c, w: tool.w };
+        const list = strokes(no);
+        undo.push({ no, list });
+        if (undo.length > 60) undo.shift();
+        save(no, [...list, st]);
+        draw(body);
+      };
+      cv.addEventListener('pointerup', end);
+      cv.addEventListener('pointercancel', end);
+      const blockStylus = (e) => { if (on && S.pencilOnly && [...e.touches].some((t) => t.touchType === 'stylus')) e.preventDefault(); };
+      cv.addEventListener('touchstart', blockStylus, { passive: false });
+      cv.addEventListener('touchmove', blockStylus, { passive: false });
+    }
+
+    // floating toolbar
+    let bar = null;
+    function buildBar() {
+      bar = h(`<div class="dbar" role="toolbar" aria-label="塗鴉工具">
+        ${COLORS.map(([c, t, hl]) => `<button class="sw" data-c="${c}" ${hl ? 'data-hl="1"' : ''} style="background:${c}" aria-label="${t}" title="${t}"></button>`).join('')}
+        <span class="sep"></span>
+        <span class="seg"><button data-w="0.07">細</button><button data-w="0.11">中</button><button data-w="0.2">粗</button></span>
+        <button class="btn small" data-act="eraser">橡皮擦</button>
+        <button class="btn small" data-act="undo">復原</button>
+        <button class="btn small primary" data-act="done">完成</button>
+      </div>`);
+      bar.addEventListener('click', (e) => {
+        const b = e.target.closest('button');
+        if (!b) return;
+        if (b.dataset.c) { tool.c = b.dataset.c; tool.hl = !!b.dataset.hl; tool.eraser = false; }
+        if (b.dataset.w) { tool.w = +b.dataset.w; tool.eraser = false; if (tool.hl) { tool.hl = false; tool.c = COLORS[0][0]; } }
+        if (b.dataset.act === 'eraser') tool.eraser = !tool.eraser;
+        if (b.dataset.act === 'undo') {
+          const u = undo.pop();
+          if (u) { save(u.no, u.list); const body = $(`#a-${CSS.escape(u.no)} .art-body`); if (body) draw(body); }
+          else toast('沒有可復原的筆畫');
+        }
+        if (b.dataset.act === 'done') { setMode(false); return; }
+        sync();
+      });
+      document.body.append(bar);
+    }
+    function sync() {
+      if (!bar) return;
+      $$('.sw', bar).forEach((b) => b.classList.toggle('on', !tool.eraser && b.dataset.c === tool.c && !!b.dataset.hl === tool.hl));
+      $$('[data-w]', bar).forEach((b) => b.classList.toggle('on', !tool.hl && !tool.eraser && +b.dataset.w === tool.w));
+      $('[data-act=eraser]', bar).classList.toggle('on', tool.eraser);
+    }
+    function setMode(v) {
+      on = v;
+      document.body.classList.toggle('doodling', on);
+      document.body.classList.toggle('doodle-finger', on && !S.pencilOnly);
+      $('#btnDoodle').classList.toggle('on', on);
+      if (on) {
+        if (!bar) buildBar();
+        bar.hidden = false; sync();
+        if (curView !== 'law') showView('law');
+        window.getSelection().removeAllRanges();
+        toast(S.pencilOnly ? '塗鴉模式：用 Apple Pencil 直接在條文上畫，手指照常捲動' : '塗鴉模式：手指或 Pencil 都可直接在條文上畫');
+      } else if (bar) bar.hidden = true;
+      refreshVisible();
+    }
+    const onResize = debounce(() => { for (const b of bodies) if (b.isConnected && b.querySelector('canvas.doodle')) draw(b); }, 150);
+    window.addEventListener('resize', onResize);
+    return { observe, unobserve, setMode, toggle: () => setMode(!on), refreshVisible, get on() { return on; }, redraw: onResize };
+  })();
+
+  /* ------------------------------------------------------------------ *
    * highlight via text selection
    * ------------------------------------------------------------------ */
   const hlbar = $('#hlbar');
@@ -1000,6 +1271,7 @@
       const anns = Store.get('ann:' + a.no, []);
       if (anns.length) parts.push(`<span class="muted">條文註記 ${anns.length} 則：</span>` + anns.slice(0, 4).map((x) => `「${esc(annQuote(a.no, x))}」<span class="ann-inline ann-${x.c}">${esc(x.t)}</span>`).join('　'));
       if (Store.get('ink:' + a.no)) parts.push('<span class="muted">✍︎ 含手寫筆記</span>');
+      if (Store.get('doodle:' + a.no)) parts.push(`<span class="muted">🖍 條文上有塗鴉 ${Store.get('doodle:' + a.no).length} 筆</span>`);
       v.append(resultItem(a.no, parts.join('<br>'), true));
     });
     sec('自訂判決／函釋');
@@ -1122,7 +1394,8 @@
       <div class="set-row"><span class="lbl">條文字體</span>${seg('font', [['sans', '黑體'], ['serif', '明體']])}</div>
       <div class="set-row"><span class="lbl">外觀</span>${seg('theme', [['auto', '自動'], ['light', '淺色'], ['sepia', '護眼'], ['dark', '深色']])}</div>
       <div class="set-row"><span class="lbl">項次標示</span>${seg('pno', [['roman', 'Ⅰ Ⅱ'], ['circle', '① ②'], ['none', '不標示']])}</div>
-      <div class="set-row"><span class="lbl">手寫<small>開啟時手指捲動、Apple Pencil 書寫</small></span>${seg('pencilOnly', [[true, '僅 Pencil'], [false, '手指也可寫']])}</div>
+      <div class="set-row"><span class="lbl">顯示條文上的塗鴉</span>${seg('showDoodle', [[true, '顯示'], [false, '隱藏']])}</div>
+      <div class="set-row"><span class="lbl">手寫與塗鴉<small>「僅 Pencil」時手指捲動、Apple Pencil 書寫</small></span>${seg('pencilOnly', [[true, '僅 Pencil'], [false, '手指也可寫']])}</div>
       <div class="set-row"><span class="lbl">顯示條文上的小字註記</span>${seg('showAnn', [[true, '顯示'], [false, '隱藏']])}</div>
       <div class="set-row"><span class="lbl">條文下顯示我的註記</span>${seg('showNotes', [[true, '顯示'], [false, '隱藏']])}</div>
       <div class="set-row"><span class="lbl">條文下顯示手寫筆記</span>${seg('showInk', [[true, '顯示'], [false, '隱藏']])}</div>
@@ -1143,6 +1416,7 @@
         const k = sg.dataset.k; let v = b.dataset.v;
         if (v === 'true') v = true; else if (v === 'false') v = false;
         S[k] = v; saveSettings();
+        if (k === 'pencilOnly') document.body.classList.toggle('doodle-finger', Doodle.on && !S.pencilOnly);
         $$('button', sg).forEach((x) => x.classList.toggle('on', x === b));
         rerenderAll();
       }
@@ -1251,6 +1525,7 @@
    * global events
    * ------------------------------------------------------------------ */
   function bind() {
+    $('#btnDoodle').onclick = () => Doodle.toggle();
     $('#btnToc').onclick = () => {
       if (window.innerWidth >= 1024) document.body.classList.toggle('toc-hidden');
       else document.body.classList.toggle('toc-open');

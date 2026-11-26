@@ -348,3 +348,23 @@ del.d { background: var(--red-soft); color: var(--red); text-decoration: line-th
 .ann:active::after { background: var(--accent-soft); }
 .ann-inline { color: var(--ann); font-size: .85em; font-weight: 600; margin-left: .3em; }
 .ann-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--ann); margin-right: 5px; vertical-align: middle; }
+
+/* ---------- Apple Pencil doodle on article text ---------- */
+.art-body { position: relative; }
+canvas.doodle { position: absolute; left: -6px; top: -4px; width: calc(100% + 12px); height: calc(100% + 8px); pointer-events: none; z-index: 2; touch-action: pan-y; }
+body.doodling canvas.doodle { pointer-events: auto; cursor: crosshair; }
+body.doodle-finger canvas.doodle { touch-action: none; }
+body.doodling .art-body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+body.doodling .art { box-shadow: 0 0 0 1.5px var(--accent-2), var(--shadow); }
+#btnDoodle.on { background: var(--accent); color: var(--paper); }
+.dbar {
+  position: fixed; z-index: 45; left: 50%; transform: translateX(-50%);
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px;
+  max-width: calc(100vw - 24px); padding: 8px 10px;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 8px 28px rgba(0,0,0,.2);
+}
+.dbar .sw { width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--line); padding: 0; }
+.dbar .sw.on { outline: 3px solid var(--accent-2); outline-offset: 1px; }
+.dbar .sep { width: 1px; height: 24px; background: var(--line); }
+@media (max-width: 760px) { .dbar { bottom: calc(70px + env(safe-area-inset-bottom, 0px)); } }
